@@ -17,6 +17,7 @@ interface SimulatorViewProps {
   simResponse: any;
   isSimulating: boolean;
   simulationLog: any[];
+  setSimulationLog?: (log: any[]) => void;
   handleSimulateWebhook: (e: React.FormEvent) => void;
   copiedText: string | null;
   setCopiedText: (val: string | null) => void;
@@ -36,6 +37,7 @@ export const SimulatorView: React.FC<SimulatorViewProps> = ({
   simResponse,
   isSimulating,
   simulationLog,
+  setSimulationLog,
   handleSimulateWebhook,
   copiedText,
   setCopiedText
@@ -297,7 +299,7 @@ export const SimulatorView: React.FC<SimulatorViewProps> = ({
                     }`}>
                       <span className="text-xs font-bold font-mono text-slate-500">CONSOLA EN TIEMPO REAL (LOGS)</span>
                       <button 
-                        onClick={() => setSimulationLog([])}
+                        onClick={() => setSimulationLog && setSimulationLog([])}
                         className={`text-[10px] transition cursor-pointer ${
                           isDarkMode ? 'text-slate-500 hover:text-slate-300' : 'text-slate-400 hover:text-slate-600'
                         }`}

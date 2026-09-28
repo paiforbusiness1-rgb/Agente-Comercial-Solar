@@ -17,6 +17,7 @@ interface LeadsViewProps {
   handleMarkContacted: (leadId: string) => void;
   copiedText: string | null;
   setCopiedText: (val: string | null) => void;
+  setActiveTab?: (tab: string) => void;
 }
 
 export const LeadsView: React.FC<LeadsViewProps> = ({
@@ -31,7 +32,8 @@ export const LeadsView: React.FC<LeadsViewProps> = ({
   handleSaveNotes,
   handleMarkContacted,
   copiedText,
-  setCopiedText
+  setCopiedText,
+  setActiveTab
 }) => {
 
   const systemData = React.useMemo(() => {
@@ -438,7 +440,7 @@ export const LeadsView: React.FC<LeadsViewProps> = ({
                     </p>
                   </div>
                   <button
-                    onClick={() => setActiveTab('simulator')}
+                    onClick={() => setActiveTab && setActiveTab('simulator')}
                     className="bg-amber-500 hover:bg-amber-600 text-white font-semibold text-xs py-2.5 px-5 rounded-xl transition cursor-pointer"
                   >
                     Simular Primer Lead en vivo →

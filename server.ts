@@ -3,18 +3,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import 'dotenv/config';
 import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { initializeApp, cert } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
-import dotenv from 'dotenv';
 import nodemailer from 'nodemailer';
 import fs from 'fs';
 import firebaseConfig from './firebase-applet-config.json';
 import { buildReceiveMessageUseCase, initRepositories } from './server/infrastructure/web/container.js';
-
-dotenv.config();
 
 const app = express();
 const PORT = 3000;
@@ -501,6 +499,9 @@ app.post(['/whatsapp-webhook', '/api/whatsapp-webhook'], async (req, res) => {
   }
 
   phone = phone.replace(/\+/g, '').replace(/\s+/g, '');
+  if (/^521\d{10}$/.test(phone)) {
+    phone = phone.replace(/^521/, '52');
+  }
 
   try {
     // Check bot-disabled flag via legacy store first

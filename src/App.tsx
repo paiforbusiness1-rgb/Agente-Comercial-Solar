@@ -227,6 +227,7 @@ export default function App() {
               handleMarkContacted={handleMarkContacted}
               copiedText={copiedText}
               setCopiedText={setCopiedText}
+              setActiveTab={setActiveTab}
             />
           )}
 
@@ -245,6 +246,7 @@ export default function App() {
               simResponse={simResponse}
               isSimulating={isSimulating}
               simulationLog={simulationLog}
+              setSimulationLog={setSimulationLog}
               handleSimulateWebhook={handleSimulateWebhook}
               copiedText={copiedText}
               setCopiedText={setCopiedText}
@@ -255,6 +257,7 @@ export default function App() {
             <CopilotView
               isDarkMode={isDarkMode}
               copilotMessages={copilotMessages}
+              setCopilotMessages={setCopilotMessages}
               copilotInput={copilotInput}
               setCopilotInput={setCopilotInput}
               isCopilotTyping={isCopilotTyping}

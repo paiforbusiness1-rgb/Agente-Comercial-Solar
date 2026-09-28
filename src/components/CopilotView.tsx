@@ -6,10 +6,11 @@ import { Message } from '../types';
 interface CopilotViewProps {
   isDarkMode: boolean;
   copilotMessages: Message[];
+  setCopilotMessages: React.Dispatch<React.SetStateAction<Message[]>>;
   copilotInput: string;
   setCopilotInput: (val: string) => void;
   isCopilotTyping: boolean;
-  handleSendCopilotQuery: (e: React.FormEvent) => void;
+  handleSendCopilotQuery: (query?: string | React.FormEvent) => void;
   copilotEndRef: React.RefObject<HTMLDivElement | null>;
   chats: any[];
   leads: any[];
@@ -18,6 +19,7 @@ interface CopilotViewProps {
 export const CopilotView: React.FC<CopilotViewProps> = ({
   isDarkMode,
   copilotMessages,
+  setCopilotMessages,
   copilotInput,
   setCopilotInput,
   isCopilotTyping,
@@ -209,7 +211,7 @@ export const CopilotView: React.FC<CopilotViewProps> = ({
                         setCopilotMessages([
                           {
                             sender: 'bot',
-                            text: 'Conversaci├│n reiniciada. ┬┐En qu├® puedo ayudarte a buscar hoy?',
+                            text: 'Conversación reiniciada. ¿En qué puedo ayudarte a buscar hoy?',
                             timestamp: new Date().toISOString()
                           }
                         ]);
@@ -247,10 +249,10 @@ export const CopilotView: React.FC<CopilotViewProps> = ({
                       {/* Message header */}
                       <div className="flex items-center space-x-1.5 mb-1.5 border-b border-amber-400/10 pb-1">
                         <span className="text-[10px] font-bold text-amber-400 tracking-wider uppercase">
-                          {msg.sender === 'user' ? 'T├║ (Ventas)' : 'Copiloto O3'}
+                          {msg.sender === 'user' ? 'Tú (Ventas)' : 'Copiloto O3'}
                         </span>
                         <span className={`text-[9px] ${isDarkMode ? 'text-slate-500' : 'text-slate-400'}`}>
-                          ÔÇó {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                          • {new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                         </span>
                       </div>
                       
@@ -279,7 +281,7 @@ export const CopilotView: React.FC<CopilotViewProps> = ({
                 <div ref={copilotEndRef} />
               </div>
 
-              {/* Sugerencias y Formulario de Env├¡o */}
+              {/* Sugerencias y Formulario de Envío */}
               <div className={`p-4 border-t shrink-0 ${
                 isDarkMode ? 'bg-slate-900/40 border-slate-800/80' : 'bg-slate-50 border-slate-200'
               }`}>
@@ -290,11 +292,11 @@ export const CopilotView: React.FC<CopilotViewProps> = ({
                   </span>
                   <div className="flex flex-wrap gap-2">
                     {[
-                      { label: '­ƒÆ░ Pipeline Total', query: '┬┐Cu├ínto es el valor de todas las cotizaciones?' },
-                      { label: '­ƒöÑ Mayor Recibo', query: '┬┐Qui├®n es el cliente con el recibo de luz m├ís alto?' },
-                      { label: '­ƒôè Tasa de Contacto', query: '┬┐Qu├® porcentaje de los leads ya han sido contactados?' },
-                      { label: '­ƒôï Leads Pendientes', query: 'Mu├®strame la lista detallada de los leads pendientes de revisi├│n' },
-                      { label: '­ƒÆ╝ Resumen General', query: 'Genera un resumen ejecutivo de todos los prospectos de la base de datos' }
+                      { label: '💰 Pipeline Total', query: '¿Cuánto es el valor de todas las cotizaciones?' },
+                      { label: '🔥 Mayor Recibo', query: '¿Quién es el cliente con el recibo de luz más alto?' },
+                      { label: '📊 Tasa de Contacto', query: '¿Qué porcentaje de los leads ya han sido contactados?' },
+                      { label: '📋 Leads Pendientes', query: 'Muéstrame la lista detallada de los leads pendientes de revisión' },
+                      { label: '💼 Resumen General', query: 'Genera un resumen ejecutivo de todos los prospectos de la base de datos' }
                     ].map((s, i) => (
                       <button
                         key={i}
@@ -325,7 +327,7 @@ export const CopilotView: React.FC<CopilotViewProps> = ({
                     type="text"
                     value={copilotInput}
                     onChange={(e) => setCopilotInput(e.target.value)}
-                    placeholder="Escribe una pregunta sobre la base de datos (ej: ┬┐Cu├íntos leads giran arriba de $5000 MXN?)"
+                    placeholder="Escribe una pregunta sobre la base de datos (ej: ¿Cuántos leads giran arriba de $5000 MXN?)"
                     disabled={isCopilotTyping}
                     className={`flex-1 text-sm py-2.5 px-4 rounded-xl outline-none border transition-all duration-150 ${
                       isDarkMode

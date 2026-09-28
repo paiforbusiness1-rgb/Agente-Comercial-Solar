@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import React, { useState } from 'react';
 
 export function useCopilot() {
   const [copilotMessages, setCopilotMessages] = useState<{ sender: 'user' | 'bot'; text: string; timestamp: string }[]>([
@@ -11,8 +11,19 @@ export function useCopilot() {
   const [copilotInput, setCopilotInput] = useState('');
   const [isCopilotTyping, setIsCopilotTyping] = useState(false);
 
-  const handleSendCopilotQuery = async (queryText?: string) => {
-    const textToSend = queryText || copilotInput;
+  const handleSendCopilotQuery = async (queryInput?: string | React.FormEvent) => {
+    let textToSend = '';
+
+    if (typeof queryInput === 'string') {
+      textToSend = queryInput;
+    } else {
+      if (queryInput && typeof queryInput === 'object' && 'preventDefault' in queryInput) {
+        queryInput.preventDefault();
+      }
+      textToSend = copilotInput;
+      setCopilotInput('');
+    }
+
     if (!textToSend.trim() || isCopilotTyping) return;
 
     const userMsg = {
@@ -22,9 +33,6 @@ export function useCopilot() {
     };
 
     setCopilotMessages(prev => [...prev, userMsg]);
-    if (!queryText) {
-      setCopilotInput('');
-    }
     setIsCopilotTyping(true);
 
     try {

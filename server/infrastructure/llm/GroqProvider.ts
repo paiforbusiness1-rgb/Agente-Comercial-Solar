@@ -13,12 +13,13 @@ async function sleep(ms: number) {
 
 export class GroqProvider implements ILLMProvider {
   private readonly endpoint = 'https://api.groq.com/openai/v1/chat/completions';
-  private readonly model: string;
-  private readonly apiKey: string;
 
-  constructor() {
-    this.model = AppConfig.groq.model;
-    this.apiKey = AppConfig.groq.apiKey;
+  private get model(): string {
+    return AppConfig.groq.model;
+  }
+
+  private get apiKey(): string {
+    return AppConfig.groq.apiKey;
   }
 
   async complete(

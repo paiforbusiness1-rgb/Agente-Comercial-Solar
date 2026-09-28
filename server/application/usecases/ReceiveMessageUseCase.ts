@@ -21,7 +21,10 @@ export class ReceiveMessageUseCase {
 
   async execute(input: IncomingMessage): Promise<{ reply: string; leadGenerated: boolean }> {
     const tenantId = input.tenantId || AppConfig.tenant.defaultId;
-    const phone = input.phone.replace(/\+/g, '').replace(/\s+/g, '');
+    let phone = input.phone.replace(/\+/g, '').replace(/\s+/g, '');
+    if (/^521\d{10}$/.test(phone)) {
+      phone = phone.replace(/^521/, '52');
+    }
 
     logger.info('[ReceiveMessageUseCase] Message received', { phone, tenantId, text: input.text.substring(0, 60) });
 
