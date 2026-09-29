@@ -49,34 +49,50 @@ v2Router.post('/whatsapp-webhook', async (req: Request, res: Response) => {
   const body = req.body;
 
   try {
-    // Meta Cloud API payload
+    // 1. Meta WhatsApp Cloud API payload
     if (body.entry?.[0]?.changes?.[0]?.value) {
       const val = body.entry[0].changes[0].value;
-
-      // Log all events (messages, statuses, delivered, read, failed)
       const eventType = val.messages ? 'message' : val.statuses ? 'status' : 'other';
-      logger.info('[v2 Webhook] Meta event received', { eventType });
+      logger.info('[v2 Webhook] WhatsApp event received', { eventType });
 
       if (val.messages?.[0]) {
         const msg = val.messages[0];
         phone = msg.from;
-        text = msg.text?.body || msg.button?.text || '';
+        text = msg.text?.body || msg.button?.text || msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || '';
         name = val.contacts?.[0]?.profile?.name || 'Cliente WhatsApp';
       } else {
-        // Status event (delivered, read, failed) — log and exit
         if (val.statuses?.[0]) {
           logger.info('[v2 Webhook] Status update', val.statuses[0]);
         }
         return res.status(200).json({ status: 'received' });
       }
     }
-    // Twilio
+    // 2. Meta Messenger payload
+    else if (body.entry?.[0]?.messaging?.[0]) {
+      const messaging = body.entry[0].messaging[0];
+      if (messaging.message?.is_echo) {
+        logger.info('[v2 Webhook] Ignoring Messenger echo');
+        return res.status(200).json({ status: 'received' });
+      }
+      if (messaging.message) {
+        phone = messaging.sender?.id || '';
+        text = messaging.message.text || '';
+        name = 'Cliente Messenger';
+      } else if (messaging.postback) {
+        phone = messaging.sender?.id || '';
+        text = messaging.postback.title || messaging.postback.payload || '';
+        name = 'Cliente Messenger';
+      } else {
+        return res.status(200).json({ status: 'received' });
+      }
+    }
+    // 3. Twilio payload
     else if (body.From && body.Body) {
       phone = body.From.replace('whatsapp:', '');
       text = body.Body;
       name = body.ProfileName || 'Cliente Twilio';
     }
-    // Playground / Simulator
+    // 4. Playground / Simulator payload
     else if (body.phone && body.text) {
       phone = body.phone;
       text = body.text;

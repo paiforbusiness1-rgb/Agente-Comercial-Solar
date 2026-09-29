@@ -23,34 +23,60 @@ import { getFirestore } from 'firebase-admin/firestore';
 const quoteEngine = new SolarQuoteEngine();
 const llmProvider = new GroqProvider();
 
-// ─── WhatsApp sender (stateless utility) ───────────────────────────────────
+// ─── WhatsApp / Meta sender (stateless utility) ───────────────────────────
 async function sendWhatsAppMessage(phone: string, text: string): Promise<boolean> {
   const { accessToken, phoneNumberId } = AppConfig.meta;
-  if (!accessToken || !phoneNumberId) {
+  if (!accessToken) {
     logger.info(`[WhatsApp SIM] → +${phone}: ${text.substring(0, 80)}...`);
     return true;
   }
+
+  // 1. Primary: WhatsApp Cloud API
+  if (phoneNumberId) {
+    try {
+      const res = await fetch(`https://graph.facebook.com/v20.0/${phoneNumberId}/messages`, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          messaging_product: 'whatsapp',
+          recipient_type: 'individual',
+          to: phone,
+          type: 'text',
+          text: { preview_url: false, body: text },
+        }),
+      });
+      const data = await res.json() as any;
+      if (!res.ok) {
+        logger.error('[WhatsApp] Send failed', data);
+        return false;
+      }
+      logger.info(`[WhatsApp] Sent successfully to +${phone}`, { messageId: data.messages?.[0]?.id });
+      return true;
+    } catch (err: any) {
+      logger.error('[WhatsApp] Exception', { error: err.message });
+      return false;
+    }
+  }
+
+  // 2. Fallback: Messenger Graph API
   try {
-    const res = await fetch(`https://graph.facebook.com/v20.0/${phoneNumberId}/messages`, {
+    const res = await fetch(`https://graph.facebook.com/v20.0/me/messages`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        messaging_product: 'whatsapp',
-        recipient_type: 'individual',
-        to: phone,
-        type: 'text',
-        text: { preview_url: false, body: text },
+        recipient: { id: phone },
+        message: { text },
       }),
     });
     if (!res.ok) {
       const err = await res.json() as any;
-      logger.error('[WhatsApp] Send failed', err);
+      logger.error('[Messenger] Send failed', err);
       return false;
     }
-    logger.info(`[WhatsApp] Sent to +${phone}`);
+    logger.info(`[Messenger] Sent successfully to PSID ${phone}`);
     return true;
   } catch (err: any) {
-    logger.error('[WhatsApp] Exception', { error: err.message });
+    logger.error('[Messenger] Exception', { error: err.message });
     return false;
   }
 }

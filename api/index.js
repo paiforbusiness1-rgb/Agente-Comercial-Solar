@@ -268,36 +268,53 @@ var InMemoryLeadRepository = class {
     if (leadsStore[leadId]) leadsStore[leadId].privateNotes = notes;
   }
 };
+var inMemoryConvFallback = new InMemoryConversationRepository();
+var inMemoryLeadFallback = new InMemoryLeadRepository();
 var FirestoreConversationRepository = class {
   constructor(db2) {
     this.db = db2;
   }
   async findByPhone(tenantId, phone) {
-    const docRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
-    const doc = await docRef.get();
-    if (!doc.exists) {
-      const conv = {
-        id: phone,
-        tenantId,
-        phone,
-        nombre: "Cliente",
-        botDisabled: false,
-        messages: [],
-        state: defaultState(),
-        lastMessageAt: (/* @__PURE__ */ new Date()).toISOString(),
-        createdAt: (/* @__PURE__ */ new Date()).toISOString()
-      };
-      await docRef.set(conv);
-      return conv;
+    try {
+      const docRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
+      const doc = await docRef.get();
+      if (!doc.exists) {
+        const conv = {
+          id: phone,
+          tenantId,
+          phone,
+          nombre: "Cliente",
+          botDisabled: false,
+          messages: [],
+          state: defaultState(),
+          lastMessageAt: (/* @__PURE__ */ new Date()).toISOString(),
+          createdAt: (/* @__PURE__ */ new Date()).toISOString()
+        };
+        await docRef.set(conv);
+        return conv;
+      }
+      return { id: doc.id, ...doc.data() };
+    } catch (err) {
+      logger.warn("[FirestoreConversationRepo] Fallback to In-Memory due to Firestore error", { error: err.message });
+      return inMemoryConvFallback.findByPhone(tenantId, phone);
     }
-    return { id: doc.id, ...doc.data() };
   }
   async save(conversation) {
-    await this.db.collection(`tenants/${conversation.tenantId}/chats`).doc(conversation.phone).set(conversation, { merge: true });
+    await inMemoryConvFallback.save(conversation);
+    try {
+      await this.db.collection(`tenants/${conversation.tenantId}/chats`).doc(conversation.phone).set(conversation, { merge: true });
+    } catch (err) {
+      logger.warn("[FirestoreConversationRepo] Firestore save failed (using in-memory fallback)", { error: err.message });
+    }
   }
   async findAll(tenantId) {
-    const snap = await this.db.collection(`tenants/${tenantId}/chats`).orderBy("lastMessageAt", "desc").get();
-    return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    try {
+      const snap = await this.db.collection(`tenants/${tenantId}/chats`).orderBy("lastMessageAt", "desc").get();
+      return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    } catch (err) {
+      logger.warn("[FirestoreConversationRepo] Fallback to In-Memory for findAll", { error: err.message });
+      return inMemoryConvFallback.findAll(tenantId);
+    }
   }
 };
 var FirestoreLeadRepository = class {
@@ -305,18 +322,38 @@ var FirestoreLeadRepository = class {
     this.db = db2;
   }
   async save(lead) {
-    await this.db.collection(`tenants/${lead.tenantId}/qualified_leads`).doc(lead.id).set(lead, { merge: true });
-    logger.info("[FirestoreLeadRepo] Lead saved", { leadId: lead.id, tenantId: lead.tenantId });
+    await inMemoryLeadFallback.save(lead);
+    try {
+      await this.db.collection(`tenants/${lead.tenantId}/qualified_leads`).doc(lead.id).set(lead, { merge: true });
+      logger.info("[FirestoreLeadRepo] Lead saved", { leadId: lead.id, tenantId: lead.tenantId });
+    } catch (err) {
+      logger.warn("[FirestoreLeadRepo] Firestore save failed (using in-memory fallback)", { error: err.message });
+    }
   }
   async findAll(tenantId) {
-    const snap = await this.db.collection(`tenants/${tenantId}/qualified_leads`).orderBy("createdAt", "desc").get();
-    return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    try {
+      const snap = await this.db.collection(`tenants/${tenantId}/qualified_leads`).orderBy("createdAt", "desc").get();
+      return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    } catch (err) {
+      logger.warn("[FirestoreLeadRepo] Fallback to In-Memory for findAll", { error: err.message });
+      return inMemoryLeadFallback.findAll(tenantId);
+    }
   }
   async updateStatus(tenantId, leadId, status) {
-    await this.db.collection(`tenants/${tenantId}/qualified_leads`).doc(leadId).update({ status });
+    await inMemoryLeadFallback.updateStatus(tenantId, leadId, status);
+    try {
+      await this.db.collection(`tenants/${tenantId}/qualified_leads`).doc(leadId).update({ status });
+    } catch (err) {
+      logger.warn("[FirestoreLeadRepo] Firestore updateStatus failed", { error: err.message });
+    }
   }
   async updateNotes(tenantId, leadId, notes) {
-    await this.db.collection(`tenants/${tenantId}/qualified_leads`).doc(leadId).set({ privateNotes: notes }, { merge: true });
+    await inMemoryLeadFallback.updateNotes(tenantId, leadId, notes);
+    try {
+      await this.db.collection(`tenants/${tenantId}/qualified_leads`).doc(leadId).set({ privateNotes: notes }, { merge: true });
+    } catch (err) {
+      logger.warn("[FirestoreLeadRepo] Firestore updateNotes failed", { error: err.message });
+    }
   }
 };
 
@@ -632,31 +669,53 @@ var quoteEngine = new SolarQuoteEngine();
 var llmProvider = new GroqProvider();
 async function sendWhatsAppMessage(phone, text) {
   const { accessToken, phoneNumberId } = AppConfig.meta;
-  if (!accessToken || !phoneNumberId) {
+  if (!accessToken) {
     logger.info(`[WhatsApp SIM] \u2192 +${phone}: ${text.substring(0, 80)}...`);
     return true;
   }
+  if (phoneNumberId) {
+    try {
+      const res = await fetch(`https://graph.facebook.com/v20.0/${phoneNumberId}/messages`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messaging_product: "whatsapp",
+          recipient_type: "individual",
+          to: phone,
+          type: "text",
+          text: { preview_url: false, body: text }
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        logger.error("[WhatsApp] Send failed", data);
+        return false;
+      }
+      logger.info(`[WhatsApp] Sent successfully to +${phone}`, { messageId: data.messages?.[0]?.id });
+      return true;
+    } catch (err) {
+      logger.error("[WhatsApp] Exception", { error: err.message });
+      return false;
+    }
+  }
   try {
-    const res = await fetch(`https://graph.facebook.com/v20.0/${phoneNumberId}/messages`, {
+    const res = await fetch(`https://graph.facebook.com/v20.0/me/messages`, {
       method: "POST",
       headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
       body: JSON.stringify({
-        messaging_product: "whatsapp",
-        recipient_type: "individual",
-        to: phone,
-        type: "text",
-        text: { preview_url: false, body: text }
+        recipient: { id: phone },
+        message: { text }
       })
     });
     if (!res.ok) {
       const err = await res.json();
-      logger.error("[WhatsApp] Send failed", err);
+      logger.error("[Messenger] Send failed", err);
       return false;
     }
-    logger.info(`[WhatsApp] Sent to +${phone}`);
+    logger.info(`[Messenger] Sent successfully to PSID ${phone}`);
     return true;
   } catch (err) {
-    logger.error("[WhatsApp] Exception", { error: err.message });
+    logger.error("[Messenger] Exception", { error: err.message });
     return false;
   }
 }
@@ -732,16 +791,33 @@ v2Router.post("/whatsapp-webhook", async (req, res) => {
     if (body.entry?.[0]?.changes?.[0]?.value) {
       const val = body.entry[0].changes[0].value;
       const eventType = val.messages ? "message" : val.statuses ? "status" : "other";
-      logger.info("[v2 Webhook] Meta event received", { eventType });
+      logger.info("[v2 Webhook] WhatsApp event received", { eventType });
       if (val.messages?.[0]) {
         const msg = val.messages[0];
         phone = msg.from;
-        text = msg.text?.body || msg.button?.text || "";
+        text = msg.text?.body || msg.button?.text || msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || "";
         name = val.contacts?.[0]?.profile?.name || "Cliente WhatsApp";
       } else {
         if (val.statuses?.[0]) {
           logger.info("[v2 Webhook] Status update", val.statuses[0]);
         }
+        return res.status(200).json({ status: "received" });
+      }
+    } else if (body.entry?.[0]?.messaging?.[0]) {
+      const messaging = body.entry[0].messaging[0];
+      if (messaging.message?.is_echo) {
+        logger.info("[v2 Webhook] Ignoring Messenger echo");
+        return res.status(200).json({ status: "received" });
+      }
+      if (messaging.message) {
+        phone = messaging.sender?.id || "";
+        text = messaging.message.text || "";
+        name = "Cliente Messenger";
+      } else if (messaging.postback) {
+        phone = messaging.sender?.id || "";
+        text = messaging.postback.title || messaging.postback.payload || "";
+        name = "Cliente Messenger";
+      } else {
         return res.status(200).json({ status: "received" });
       }
     } else if (body.From && body.Body) {
