@@ -771,39 +771,6 @@ v2Router.get("/ready", (_req, res) => {
     }
   });
 });
-v2Router.get("/test-send-live", async (req, res) => {
-  const to = req.query.to || "5214777241148";
-  const { accessToken, phoneNumberId } = AppConfig.meta;
-  if (!accessToken || !phoneNumberId) {
-    return res.status(400).json({ error: "Missing token or phone id in Vercel config", accessToken: !!accessToken, phoneNumberId });
-  }
-  try {
-    const metaUrl = `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`;
-    const response = await fetch(metaUrl, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        messaging_product: "whatsapp",
-        recipient_type: "individual",
-        to,
-        type: "text",
-        text: { preview_url: false, body: "\u{1F916} Test diagn\xF3stico en vivo de Sof\xEDa" }
-      })
-    });
-    const data = await response.json();
-    return res.status(response.status).json({
-      metaHttpStatus: response.status,
-      metaUrl,
-      phoneNumberId,
-      metaResponse: data
-    });
-  } catch (err) {
-    return res.status(500).json({ error: err.message });
-  }
-});
 v2Router.get("/whatsapp-webhook", (req, res) => {
   const mode = req.query["hub.mode"];
   const token = req.query["hub.verify_token"];
