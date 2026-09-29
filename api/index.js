@@ -585,10 +585,7 @@ var ReceiveMessageUseCase = class {
   }
   async execute(input) {
     const tenantId = input.tenantId || AppConfig.tenant.defaultId;
-    let phone = input.phone.replace(/\+/g, "").replace(/\s+/g, "");
-    if (/^521\d{10}$/.test(phone)) {
-      phone = phone.replace(/^521/, "52");
-    }
+    const phone = input.phone.replace(/[^\d]/g, "");
     logger.info("[ReceiveMessageUseCase] Message received", { phone, tenantId, text: input.text.substring(0, 60) });
     let conversation = await this.convRepo.findByPhone(tenantId, phone);
     if (input.name && conversation.nombre === "Cliente") {

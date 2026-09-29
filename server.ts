@@ -498,10 +498,7 @@ app.post(['/whatsapp-webhook', '/api/whatsapp-webhook'], async (req, res) => {
     return res.status(400).json({ error: 'Faltan parámetros requeridos (teléfono o texto)' });
   }
 
-  phone = phone.replace(/\+/g, '').replace(/\s+/g, '');
-  if (/^521\d{10}$/.test(phone)) {
-    phone = phone.replace(/^521/, '52');
-  }
+  phone = phone.replace(/[^\d]/g, '');
 
   try {
     // Check bot-disabled flag via legacy store first
