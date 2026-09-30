@@ -26,13 +26,22 @@ export function useFirebase({ onNewLeadNotification }: UseFirebaseProps) {
 
     const fetchBackupData = async () => {
       try {
-        const chatsRes = await fetch('/api/chats');
+        const chatsRes = await fetch('/api/v2/chats', {
+          method: 'GET',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+        });
         if (chatsRes.ok) {
-          const chatsData = await chatsRes.json();
-          setChats(chatsData);
+          const chatsData: Chat[] = await chatsRes.json();
+          // Filter out soft-deleted chats
+          setChats(chatsData.filter((c) => (c as any).status !== 'deleted'));
         }
         
-        const leadsRes = await fetch('/api/leads');
+        const leadsRes = await fetch('/api/v2/leads', {
+          method: 'GET',
+          headers: { 'Content-Type': 'application/json' },
+          credentials: 'include',
+        });
         if (leadsRes.ok) {
           const leadsData: QualifiedLead[] = await leadsRes.json();
           
@@ -79,7 +88,11 @@ export function useFirebase({ onNewLeadNotification }: UseFirebaseProps) {
         clearTimeout(connectionTimeout);
         const chatsList: Chat[] = [];
         snapshot.forEach((doc) => {
-          chatsList.push({ id: doc.id, ...(doc.data() as any) });
+          const data = doc.data() as any;
+          // Filter out soft-deleted chats in real-time
+          if (data.status !== 'deleted') {
+            chatsList.push({ id: doc.id, ...data });
+          }
         });
         setChats(chatsList);
         setIsLoading(false);

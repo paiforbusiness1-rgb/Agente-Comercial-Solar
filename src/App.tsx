@@ -230,6 +230,7 @@ export default function App() {
             <ChatsView 
               isDarkMode={isDarkMode}
               chats={chats}
+              setChats={setChats}
               chatSearch={chatSearch}
               setChatSearch={setChatSearch}
               selectedChatPhone={selectedChatPhone}

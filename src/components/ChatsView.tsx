@@ -6,6 +6,7 @@ import { Chat } from '../types';
 interface ChatsViewProps {
   isDarkMode: boolean;
   chats: Chat[];
+  setChats?: React.Dispatch<React.SetStateAction<Chat[]>>;
   chatSearch: string;
   setChatSearch: (val: string) => void;
   selectedChatPhone: string | null;
@@ -20,6 +21,7 @@ interface ChatsViewProps {
 export const ChatsView: React.FC<ChatsViewProps> = ({
   isDarkMode,
   chats,
+  setChats,
   chatSearch,
   setChatSearch,
   selectedChatPhone,
@@ -119,8 +121,12 @@ export const ChatsView: React.FC<ChatsViewProps> = ({
 
       if (res.ok) {
         showToast(`🗑️ Chat de +${chatToDelete.phone} archivado en la Papelera`);
-        if (selectedChatPhone === chatToDelete.phone) {
+        const phoneToRemove = chatToDelete.phone;
+        if (selectedChatPhone === phoneToRemove) {
           setSelectedChatPhone(null);
+        }
+        if (setChats) {
+          setChats((prev) => prev.filter((c) => c.phone !== phoneToRemove));
         }
         fetchTrashChats();
       } else {
@@ -147,6 +153,10 @@ export const ChatsView: React.FC<ChatsViewProps> = ({
 
       if (res.ok) {
         showToast(`♻️ Chat +${phone} restaurado a la lista activa`);
+        setTrashedChats((prev) => prev.filter((c) => c.phone !== phone));
+        if (selectedChatPhone === phone) {
+          setSelectedChatPhone(null);
+        }
         fetchTrashChats();
       } else {
         showToast(data.error || 'Error al restaurar la conversación');
