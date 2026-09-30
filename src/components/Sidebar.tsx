@@ -1,11 +1,11 @@
 import React from 'react';
-import { MessageSquare, Users, Database, Sparkles, Server, Trash2, X } from 'lucide-react';
+import { MessageSquare, Users, Database, Sparkles, Server, Trash2, X, LogOut, ShieldCheck } from 'lucide-react';
 import { Chat, QualifiedLead } from '../types';
 
 interface SidebarProps {
   isDarkMode: boolean;
   activeTab: string;
-  setActiveTab: (tab: 'chats' | 'leads' | 'simulator' | 'guide' | 'copilot') => void;
+  setActiveTab: (tab: 'chats' | 'leads' | 'simulator' | 'guide' | 'copilot' | 'audit') => void;
   chats: Chat[];
   leads: QualifiedLead[];
   isFirebaseConnected: boolean;
@@ -13,6 +13,8 @@ interface SidebarProps {
   handleResetDemo: () => Promise<void>;
   isMobileMenuOpen: boolean;
   setIsMobileMenuOpen: (val: boolean) => void;
+  user?: { email: string; role: string } | null;
+  handleLogout?: () => Promise<void>;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -25,7 +27,9 @@ export const Sidebar: React.FC<SidebarProps> = ({
   lastRefreshed,
   handleResetDemo,
   isMobileMenuOpen,
-  setIsMobileMenuOpen
+  setIsMobileMenuOpen,
+  user,
+  handleLogout
 }) => {
   return (
     <>
@@ -159,12 +163,59 @@ export const Sidebar: React.FC<SidebarProps> = ({
             </span>
           </button>
 
+          <button
+            onClick={() => { setActiveTab('audit'); setIsMobileMenuOpen(false); }}
+            className={`w-full flex items-center justify-between px-4 py-3 rounded-xl transition-all duration-200 text-left border cursor-pointer ${
+              activeTab === 'audit'
+                ? isDarkMode
+                  ? 'bg-amber-500/10 text-amber-500 border-amber-500/30 font-medium shadow-lg shadow-amber-950/30'
+                  : 'bg-amber-50 text-amber-600 border-amber-500/30 font-semibold shadow-md shadow-amber-100'
+                : isDarkMode
+                ? 'text-slate-400 border-transparent hover:bg-slate-600/40 hover:text-slate-100'
+                : 'text-slate-600 border-transparent hover:bg-slate-100 hover:text-slate-800'
+            }`}
+          >
+            <div className="flex items-center space-x-3">
+              <ShieldCheck className="h-4 w-4 text-amber-400" />
+              <span className="text-sm font-medium">Bitácora Auditoría</span>
+            </div>
+            <span className={`text-[9px] border px-2 py-0.5 rounded font-mono ${
+              isDarkMode 
+                ? 'bg-slate-700 text-emerald-400 border-emerald-500/30' 
+                : 'bg-emerald-50 text-emerald-600 border-emerald-200'
+            }`}>
+              ISO 27034
+            </span>
+          </button>
+
         </nav>
 
         {/* Footer / Status Area */}
         <div className={`p-4 border-t space-y-3 transition-colors duration-200 ${
           isDarkMode ? 'bg-slate-700/30 border-slate-600/60' : 'bg-slate-50 border-slate-200'
         }`}>
+          {user && (
+            <div className="flex items-center justify-between p-2 rounded-xl bg-slate-900/60 border border-slate-800 text-xs">
+              <div className="flex items-center space-x-2 truncate">
+                <ShieldCheck className="h-4 w-4 text-emerald-400 shrink-0" />
+                <div className="truncate">
+                  <span className="block font-semibold text-slate-200 truncate">{user.email}</span>
+                  <span className="text-[10px] text-amber-400 uppercase font-mono">{user.role}</span>
+                </div>
+              </div>
+              {handleLogout && (
+                <button
+                  type="button"
+                  onClick={handleLogout}
+                  title="Cerrar Sesión"
+                  className="p-1.5 rounded-lg text-slate-400 hover:text-red-400 hover:bg-slate-800 transition-colors"
+                >
+                  <LogOut className="h-4 w-4" />
+                </button>
+              )}
+            </div>
+          )}
+
           <div className="flex items-center justify-between text-xs">
             <span className="text-slate-550">Firestore DB:</span>
             <span className={`flex items-center font-medium ${isFirebaseConnected ? 'text-emerald-500' : 'text-amber-500'}`}>

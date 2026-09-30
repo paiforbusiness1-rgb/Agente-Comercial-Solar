@@ -25,6 +25,7 @@ export class InMemoryConversationRepository implements IConversationRepository {
         botDisabled: false, messages: [], state: defaultState(),
         lastMessageAt: new Date().toISOString(),
         createdAt: new Date().toISOString(),
+        status: 'active',
       };
     }
     return chatsStore[key];
@@ -32,11 +33,54 @@ export class InMemoryConversationRepository implements IConversationRepository {
 
   async save(conversation: Conversation): Promise<void> {
     const key = `${conversation.tenantId}::${conversation.phone}`;
+    if (!conversation.status) conversation.status = 'active';
     chatsStore[key] = conversation;
   }
 
   async findAll(tenantId: string): Promise<Conversation[]> {
-    return Object.values(chatsStore).filter((c) => c.tenantId === tenantId);
+    return Object.values(chatsStore).filter((c) => c.tenantId === tenantId && c.status !== 'deleted');
+  }
+
+  async findTrash(tenantId: string): Promise<Conversation[]> {
+    return Object.values(chatsStore).filter((c) => c.tenantId === tenantId && c.status === 'deleted');
+  }
+
+  async softDelete(tenantId: string, phone: string, deletedBy: string): Promise<boolean> {
+    const conv = await this.findByPhone(tenantId, phone);
+    if (!conv) return false;
+    conv.status = 'deleted';
+    conv.deletedAt = new Date().toISOString();
+    conv.deletedBy = deletedBy;
+    await this.save(conv);
+    return true;
+  }
+
+  async restore(tenantId: string, phone: string): Promise<boolean> {
+    const conv = await this.findByPhone(tenantId, phone);
+    if (!conv) return false;
+    conv.status = 'active';
+    conv.deletedAt = undefined;
+    conv.deletedBy = undefined;
+    await this.save(conv);
+    return true;
+  }
+
+  async purgeExpiredTrash(tenantId: string, daysRetention: number = 30): Promise<number> {
+    const cutoffMs = Date.now() - daysRetention * 24 * 60 * 60 * 1000;
+    let purgedCount = 0;
+
+    Object.keys(chatsStore).forEach((key) => {
+      const conv = chatsStore[key];
+      if (conv.tenantId === tenantId && conv.status === 'deleted' && conv.deletedAt) {
+        const deletedTime = new Date(conv.deletedAt).getTime();
+        if (deletedTime < cutoffMs) {
+          delete chatsStore[key];
+          purgedCount++;
+        }
+      }
+    });
+
+    return purgedCount;
   }
 }
 
@@ -76,11 +120,12 @@ export class FirestoreConversationRepository implements IConversationRepository 
           botDisabled: false, messages: [], state: defaultState(),
           lastMessageAt: new Date().toISOString(),
           createdAt: new Date().toISOString(),
+          status: 'active',
         };
         await docRef.set(conv);
         return conv;
       }
-      return { id: doc.id, ...doc.data() } as Conversation;
+      return { id: doc.id, status: 'active', ...doc.data() } as Conversation;
     } catch (err: any) {
       logger.warn('[FirestoreConversationRepo] Fallback to In-Memory due to Firestore error', { error: err.message });
       return inMemoryConvFallback.findByPhone(tenantId, phone);
@@ -88,6 +133,7 @@ export class FirestoreConversationRepository implements IConversationRepository 
   }
 
   async save(conversation: Conversation): Promise<void> {
+    if (!conversation.status) conversation.status = 'active';
     await inMemoryConvFallback.save(conversation);
     try {
       await this.db
@@ -105,11 +151,85 @@ export class FirestoreConversationRepository implements IConversationRepository 
         .collection(`tenants/${tenantId}/chats`)
         .orderBy('lastMessageAt', 'desc')
         .get();
-      return snap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+      const all: Conversation[] = snap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+      return all.filter((c) => c.status !== 'deleted');
     } catch (err: any) {
       logger.warn('[FirestoreConversationRepo] Fallback to In-Memory for findAll', { error: err.message });
       return inMemoryConvFallback.findAll(tenantId);
     }
+  }
+
+  async findTrash(tenantId: string): Promise<Conversation[]> {
+    try {
+      const snap = await this.db
+        .collection(`tenants/${tenantId}/chats`)
+        .where('status', '==', 'deleted')
+        .get();
+      return snap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+    } catch (err: any) {
+      logger.warn('[FirestoreConversationRepo] Fallback to In-Memory for findTrash', { error: err.message });
+      return inMemoryConvFallback.findTrash(tenantId);
+    }
+  }
+
+  async softDelete(tenantId: string, phone: string, deletedBy: string): Promise<boolean> {
+    await inMemoryConvFallback.softDelete(tenantId, phone, deletedBy);
+    try {
+      const docRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
+      await docRef.set({
+        status: 'deleted',
+        deletedAt: new Date().toISOString(),
+        deletedBy,
+      }, { merge: true });
+      return true;
+    } catch (err: any) {
+      logger.warn('[FirestoreConversationRepo] Firestore softDelete failed', { error: err.message });
+      return false;
+    }
+  }
+
+  async restore(tenantId: string, phone: string): Promise<boolean> {
+    await inMemoryConvFallback.restore(tenantId, phone);
+    try {
+      const docRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
+      await docRef.set({
+        status: 'active',
+        deletedAt: null,
+        deletedBy: null,
+      }, { merge: true });
+      return true;
+    } catch (err: any) {
+      logger.warn('[FirestoreConversationRepo] Firestore restore failed', { error: err.message });
+      return false;
+    }
+  }
+
+  async purgeExpiredTrash(tenantId: string, daysRetention: number = 30): Promise<number> {
+    await inMemoryConvFallback.purgeExpiredTrash(tenantId, daysRetention);
+    const cutoffIso = new Date(Date.now() - daysRetention * 24 * 60 * 60 * 1000).toISOString();
+    let purgedCount = 0;
+
+    try {
+      const snap = await this.db
+        .collection(`tenants/${tenantId}/chats`)
+        .where('status', '==', 'deleted')
+        .where('deletedAt', '<', cutoffIso)
+        .get();
+
+      if (!snap.empty) {
+        const batch = this.db.batch();
+        snap.docs.forEach((doc: any) => {
+          batch.delete(doc.ref);
+          purgedCount++;
+        });
+        await batch.commit();
+        logger.info(`[FirestoreConversationRepo] Purged ${purgedCount} expired soft-deleted chats older than ${daysRetention} days`);
+      }
+    } catch (err: any) {
+      logger.warn('[FirestoreConversationRepo] Firestore purgeExpiredTrash failed', { error: err.message });
+    }
+
+    return purgedCount;
   }
 }
 

@@ -1,7 +1,7 @@
 // api_src/index.ts
 import express from "express";
-import { initializeApp, getApps as getApps3, cert } from "firebase-admin/app";
-import { getFirestore as getFirestore2 } from "firebase-admin/firestore";
+import { initializeApp, getApps as getApps5, cert } from "firebase-admin/app";
+import { getFirestore as getFirestore4 } from "firebase-admin/firestore";
 import nodemailer2 from "nodemailer";
 
 // server/infrastructure/web/v2Router.ts
@@ -48,6 +48,14 @@ var AppConfig = {
   },
   get appUrl() {
     return process.env.APP_URL || "https://agente-comercial-solar.vercel.app";
+  },
+  get auth() {
+    return {
+      adminEmail: process.env.ADMIN_EMAIL || "admin@o3energy.mx",
+      adminPasswordHash: process.env.ADMIN_PASSWORD_HASH || "",
+      jwtSecret: process.env.JWT_SECRET || "fallback-super-secret-jwt-key-minimum-32-chars-entropy-2026",
+      tokenExpiresInHours: parseInt(process.env.JWT_EXPIRES_IN_HOURS || "8", 10)
+    };
   }
 };
 
@@ -281,17 +289,55 @@ var InMemoryConversationRepository = class {
         messages: [],
         state: defaultState(),
         lastMessageAt: (/* @__PURE__ */ new Date()).toISOString(),
-        createdAt: (/* @__PURE__ */ new Date()).toISOString()
+        createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+        status: "active"
       };
     }
     return chatsStore[key];
   }
   async save(conversation) {
     const key = `${conversation.tenantId}::${conversation.phone}`;
+    if (!conversation.status) conversation.status = "active";
     chatsStore[key] = conversation;
   }
   async findAll(tenantId) {
-    return Object.values(chatsStore).filter((c) => c.tenantId === tenantId);
+    return Object.values(chatsStore).filter((c) => c.tenantId === tenantId && c.status !== "deleted");
+  }
+  async findTrash(tenantId) {
+    return Object.values(chatsStore).filter((c) => c.tenantId === tenantId && c.status === "deleted");
+  }
+  async softDelete(tenantId, phone, deletedBy) {
+    const conv = await this.findByPhone(tenantId, phone);
+    if (!conv) return false;
+    conv.status = "deleted";
+    conv.deletedAt = (/* @__PURE__ */ new Date()).toISOString();
+    conv.deletedBy = deletedBy;
+    await this.save(conv);
+    return true;
+  }
+  async restore(tenantId, phone) {
+    const conv = await this.findByPhone(tenantId, phone);
+    if (!conv) return false;
+    conv.status = "active";
+    conv.deletedAt = void 0;
+    conv.deletedBy = void 0;
+    await this.save(conv);
+    return true;
+  }
+  async purgeExpiredTrash(tenantId, daysRetention = 30) {
+    const cutoffMs = Date.now() - daysRetention * 24 * 60 * 60 * 1e3;
+    let purgedCount = 0;
+    Object.keys(chatsStore).forEach((key) => {
+      const conv = chatsStore[key];
+      if (conv.tenantId === tenantId && conv.status === "deleted" && conv.deletedAt) {
+        const deletedTime = new Date(conv.deletedAt).getTime();
+        if (deletedTime < cutoffMs) {
+          delete chatsStore[key];
+          purgedCount++;
+        }
+      }
+    });
+    return purgedCount;
   }
 };
 var InMemoryLeadRepository = class {
@@ -328,18 +374,20 @@ var FirestoreConversationRepository = class {
           messages: [],
           state: defaultState(),
           lastMessageAt: (/* @__PURE__ */ new Date()).toISOString(),
-          createdAt: (/* @__PURE__ */ new Date()).toISOString()
+          createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+          status: "active"
         };
         await docRef.set(conv);
         return conv;
       }
-      return { id: doc.id, ...doc.data() };
+      return { id: doc.id, status: "active", ...doc.data() };
     } catch (err) {
       logger.warn("[FirestoreConversationRepo] Fallback to In-Memory due to Firestore error", { error: err.message });
       return inMemoryConvFallback.findByPhone(tenantId, phone);
     }
   }
   async save(conversation) {
+    if (!conversation.status) conversation.status = "active";
     await inMemoryConvFallback.save(conversation);
     try {
       await this.db.collection(`tenants/${conversation.tenantId}/chats`).doc(conversation.phone).set(conversation, { merge: true });
@@ -350,11 +398,71 @@ var FirestoreConversationRepository = class {
   async findAll(tenantId) {
     try {
       const snap = await this.db.collection(`tenants/${tenantId}/chats`).orderBy("lastMessageAt", "desc").get();
-      return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      const all = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      return all.filter((c) => c.status !== "deleted");
     } catch (err) {
       logger.warn("[FirestoreConversationRepo] Fallback to In-Memory for findAll", { error: err.message });
       return inMemoryConvFallback.findAll(tenantId);
     }
+  }
+  async findTrash(tenantId) {
+    try {
+      const snap = await this.db.collection(`tenants/${tenantId}/chats`).where("status", "==", "deleted").get();
+      return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    } catch (err) {
+      logger.warn("[FirestoreConversationRepo] Fallback to In-Memory for findTrash", { error: err.message });
+      return inMemoryConvFallback.findTrash(tenantId);
+    }
+  }
+  async softDelete(tenantId, phone, deletedBy) {
+    await inMemoryConvFallback.softDelete(tenantId, phone, deletedBy);
+    try {
+      const docRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
+      await docRef.set({
+        status: "deleted",
+        deletedAt: (/* @__PURE__ */ new Date()).toISOString(),
+        deletedBy
+      }, { merge: true });
+      return true;
+    } catch (err) {
+      logger.warn("[FirestoreConversationRepo] Firestore softDelete failed", { error: err.message });
+      return false;
+    }
+  }
+  async restore(tenantId, phone) {
+    await inMemoryConvFallback.restore(tenantId, phone);
+    try {
+      const docRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
+      await docRef.set({
+        status: "active",
+        deletedAt: null,
+        deletedBy: null
+      }, { merge: true });
+      return true;
+    } catch (err) {
+      logger.warn("[FirestoreConversationRepo] Firestore restore failed", { error: err.message });
+      return false;
+    }
+  }
+  async purgeExpiredTrash(tenantId, daysRetention = 30) {
+    await inMemoryConvFallback.purgeExpiredTrash(tenantId, daysRetention);
+    const cutoffIso = new Date(Date.now() - daysRetention * 24 * 60 * 60 * 1e3).toISOString();
+    let purgedCount = 0;
+    try {
+      const snap = await this.db.collection(`tenants/${tenantId}/chats`).where("status", "==", "deleted").where("deletedAt", "<", cutoffIso).get();
+      if (!snap.empty) {
+        const batch = this.db.batch();
+        snap.docs.forEach((doc) => {
+          batch.delete(doc.ref);
+          purgedCount++;
+        });
+        await batch.commit();
+        logger.info(`[FirestoreConversationRepo] Purged ${purgedCount} expired soft-deleted chats older than ${daysRetention} days`);
+      }
+    } catch (err) {
+      logger.warn("[FirestoreConversationRepo] Firestore purgeExpiredTrash failed", { error: err.message });
+    }
+    return purgedCount;
   }
 };
 var FirestoreLeadRepository = class {
@@ -1125,8 +1233,415 @@ function buildReceiveMessageUseCase() {
   );
 }
 
+// server/infrastructure/services/AuthService.ts
+import crypto from "crypto";
+var AuthService = class {
+  /**
+   * Verifies a plain text password against a scrypt-hashed password (salt:derivedHex).
+   * Uses crypto.timingSafeEqual to prevent timing side-channel attacks.
+   */
+  static verifyPassword(password, storedHash) {
+    if (!password || !storedHash || !storedHash.includes(":")) {
+      return false;
+    }
+    try {
+      const [salt, keyHex] = storedHash.split(":");
+      if (!salt || !keyHex) return false;
+      const derivedKey = crypto.scryptSync(password, salt, 64);
+      const targetKey = Buffer.from(keyHex, "hex");
+      if (derivedKey.length !== targetKey.length) {
+        return false;
+      }
+      return crypto.timingSafeEqual(derivedKey, targetKey);
+    } catch (err) {
+      console.error("[AuthService] Error verifying password hash:", err);
+      return false;
+    }
+  }
+  /**
+   * Signs a JWT with HS256 using AppConfig.auth.jwtSecret.
+   */
+  static generateToken(user) {
+    const secret = AppConfig.auth.jwtSecret;
+    const now = Math.floor(Date.now() / 1e3);
+    const expiresInSeconds = (AppConfig.auth.tokenExpiresInHours || 8) * 3600;
+    const header = { alg: "HS256", typ: "JWT" };
+    const payload = {
+      sub: user.id,
+      email: user.email,
+      role: user.role,
+      iat: now,
+      exp: now + expiresInSeconds
+    };
+    const headerB64 = Buffer.from(JSON.stringify(header)).toString("base64url");
+    const payloadB64 = Buffer.from(JSON.stringify(payload)).toString("base64url");
+    const signatureInput = `${headerB64}.${payloadB64}`;
+    const signatureB64 = crypto.createHmac("sha256", secret).update(signatureInput).digest("base64url");
+    return `${signatureInput}.${signatureB64}`;
+  }
+  /**
+   * Verifies a JWT token signature and expiration.
+   */
+  static verifyToken(token) {
+    if (!token || typeof token !== "string") {
+      return { valid: false, error: "Token missing" };
+    }
+    const parts = token.trim().split(".");
+    if (parts.length !== 3) {
+      return { valid: false, error: "Malformed token structure" };
+    }
+    const [headerB64, payloadB64, signatureB64] = parts;
+    const secret = AppConfig.auth.jwtSecret;
+    const expectedSignatureB64 = crypto.createHmac("sha256", secret).update(`${headerB64}.${payloadB64}`).digest("base64url");
+    const sigBuf = Buffer.from(signatureB64);
+    const expectedBuf = Buffer.from(expectedSignatureB64);
+    if (sigBuf.length !== expectedBuf.length || !crypto.timingSafeEqual(sigBuf, expectedBuf)) {
+      return { valid: false, error: "Invalid token signature" };
+    }
+    try {
+      const payloadJson = Buffer.from(payloadB64, "base64url").toString("utf-8");
+      const payload = JSON.parse(payloadJson);
+      const now = Math.floor(Date.now() / 1e3);
+      if (payload.exp && payload.exp < now) {
+        return { valid: false, error: "Token has expired" };
+      }
+      return { valid: true, payload };
+    } catch (err) {
+      return { valid: false, error: "Failed to parse token payload" };
+    }
+  }
+  /**
+   * Parses standard HTTP Cookie header into a key-value record.
+   */
+  static parseCookies(cookieHeader) {
+    const list = {};
+    if (!cookieHeader) return list;
+    cookieHeader.split(";").forEach((cookie) => {
+      const parts = cookie.split("=");
+      if (parts.length >= 2) {
+        const name = parts[0].trim();
+        const val = parts.slice(1).join("=").trim();
+        list[name] = decodeURIComponent(val);
+      }
+    });
+    return list;
+  }
+  /**
+   * Generates a Set-Cookie header string for the httpOnly token.
+   */
+  static createHttpOnlyCookie(token, maxAgeSeconds = 8 * 3600) {
+    const isProd = process.env.NODE_ENV === "production";
+    const secureFlag = isProd ? "; Secure" : "";
+    return `token=${token}; HttpOnly${secureFlag}; SameSite=Strict; Path=/; Max-Age=${maxAgeSeconds}`;
+  }
+  /**
+   * Generates a Set-Cookie header string to clear/expire the cookie.
+   */
+  static createLogoutCookie() {
+    const isProd = process.env.NODE_ENV === "production";
+    const secureFlag = isProd ? "; Secure" : "";
+    return `token=; HttpOnly${secureFlag}; SameSite=Strict; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+  }
+};
+
+// server/infrastructure/services/RateLimiterService.ts
+import { getApps as getApps3 } from "firebase-admin/app";
+import { getFirestore as getFirestore2 } from "firebase-admin/firestore";
+var memoryLimiter = /* @__PURE__ */ new Map();
+var RateLimiterService = class {
+  static {
+    this.MAX_ATTEMPTS = 5;
+  }
+  static {
+    this.WINDOW_MS = 15 * 60 * 1e3;
+  }
+  // 15 minutes window
+  /**
+   * Checks if an IP is currently rate limited.
+   * Returns { allowed: boolean, remainingAttempts: number, resetInSeconds: number }
+   */
+  static async checkRateLimit(ip) {
+    const now = Date.now();
+    try {
+      if (getApps3().length > 0) {
+        const db2 = getFirestore2();
+        const docId = Buffer.from(ip).toString("hex");
+        const docRef = db2.collection("rate_limits").doc(docId);
+        const snap = await docRef.get();
+        if (snap.exists) {
+          const data = snap.data();
+          if (now - data.firstAttemptAt > this.WINDOW_MS) {
+            return { allowed: true, remainingAttempts: this.MAX_ATTEMPTS, resetInSeconds: 0 };
+          }
+          if (data.attempts >= this.MAX_ATTEMPTS) {
+            const resetInSeconds = Math.ceil((data.firstAttemptAt + this.WINDOW_MS - now) / 1e3);
+            return { allowed: false, remainingAttempts: 0, resetInSeconds: Math.max(1, resetInSeconds) };
+          }
+          return { allowed: true, remainingAttempts: this.MAX_ATTEMPTS - data.attempts, resetInSeconds: 0 };
+        }
+      }
+    } catch (err) {
+      logger.warn("[RateLimiterService] Firestore read failed, falling back to memory", { error: err.message });
+    }
+    const record = memoryLimiter.get(ip);
+    if (!record) {
+      return { allowed: true, remainingAttempts: this.MAX_ATTEMPTS, resetInSeconds: 0 };
+    }
+    if (now - record.firstAttemptAt > this.WINDOW_MS) {
+      memoryLimiter.delete(ip);
+      return { allowed: true, remainingAttempts: this.MAX_ATTEMPTS, resetInSeconds: 0 };
+    }
+    if (record.attempts >= this.MAX_ATTEMPTS) {
+      const resetInSeconds = Math.ceil((record.firstAttemptAt + this.WINDOW_MS - now) / 1e3);
+      return { allowed: false, remainingAttempts: 0, resetInSeconds: Math.max(1, resetInSeconds) };
+    }
+    return { allowed: true, remainingAttempts: this.MAX_ATTEMPTS - record.attempts, resetInSeconds: 0 };
+  }
+  /**
+   * Registers a failed attempt for an IP address.
+   */
+  static async registerFailedAttempt(ip) {
+    const now = Date.now();
+    let record = memoryLimiter.get(ip);
+    if (!record || now - record.firstAttemptAt > this.WINDOW_MS) {
+      record = { ip, attempts: 1, firstAttemptAt: now, blockedUntil: 0 };
+    } else {
+      record.attempts += 1;
+    }
+    memoryLimiter.set(ip, record);
+    if (getApps3().length > 0) {
+      try {
+        const db2 = getFirestore2();
+        const docId = Buffer.from(ip).toString("hex");
+        const docRef = db2.collection("rate_limits").doc(docId);
+        docRef.set(record, { merge: true }).catch((err) => {
+          logger.warn("[RateLimiterService] Async Firestore write failed", { error: err.message });
+        });
+      } catch (err) {
+        logger.warn("[RateLimiterService] Firestore exception on write", { error: err.message });
+      }
+    }
+  }
+  /**
+   * Clears attempts on successful login.
+   */
+  static async resetRateLimit(ip) {
+    memoryLimiter.delete(ip);
+    if (getApps3().length > 0) {
+      try {
+        const db2 = getFirestore2();
+        const docId = Buffer.from(ip).toString("hex");
+        const docRef = db2.collection("rate_limits").doc(docId);
+        docRef.delete().catch(() => {
+        });
+      } catch (e) {
+      }
+    }
+  }
+  /**
+   * Utility for testing: clears all memory limits.
+   */
+  static clearMemoryStore() {
+    memoryLimiter.clear();
+  }
+};
+
+// server/infrastructure/services/AuditLogService.ts
+import { getApps as getApps4 } from "firebase-admin/app";
+import { getFirestore as getFirestore3 } from "firebase-admin/firestore";
+var memoryAuditLogs = [];
+var AuditLogService = class {
+  /**
+   * Appends an immutable audit log entry to Firestore with in-memory fallback.
+   */
+  static async logEvent(entry) {
+    const fullEntry = {
+      ...entry,
+      id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      timestamp: (/* @__PURE__ */ new Date()).toISOString()
+    };
+    memoryAuditLogs.push(fullEntry);
+    logger.info(`[AuditLog] EVENT REGISTERED: ${fullEntry.eventType}`, {
+      user: fullEntry.userEmail,
+      resource: fullEntry.resourceId,
+      ip: fullEntry.ipAddress
+    });
+    if (getApps4().length > 0) {
+      try {
+        const db2 = getFirestore3();
+        db2.collection(`tenants/${fullEntry.tenantId}/audit_logs`).doc(fullEntry.id).set(fullEntry).catch((err) => {
+          logger.warn("[AuditLog] Non-blocking Firestore save failed", { error: err.message });
+        });
+      } catch (err) {
+        logger.warn("[AuditLog] Firestore write exception", { error: err.message });
+      }
+    }
+    return fullEntry;
+  }
+  /**
+   * Retrieves paginated audit logs for a tenant.
+   */
+  static async getLogs(tenantId, page = 1, limit = 50, eventType) {
+    const safePage = Math.max(1, page);
+    const safeLimit = Math.min(100, Math.max(1, limit));
+    if (getApps4().length > 0) {
+      try {
+        const db2 = getFirestore3();
+        let query = db2.collection(`tenants/${tenantId}/audit_logs`);
+        if (eventType) {
+          query = query.where("eventType", "==", eventType);
+        }
+        const snap = await query.orderBy("timestamp", "desc").get();
+        if (!snap.empty) {
+          const allDocs = snap.docs.map((d) => d.data());
+          const total2 = allDocs.length;
+          const totalPages2 = Math.ceil(total2 / safeLimit) || 1;
+          const startIndex2 = (safePage - 1) * safeLimit;
+          const paginatedData2 = allDocs.slice(startIndex2, startIndex2 + safeLimit);
+          return {
+            data: paginatedData2,
+            total: total2,
+            page: safePage,
+            limit: safeLimit,
+            totalPages: totalPages2
+          };
+        }
+      } catch (err) {
+        logger.warn("[AuditLog] Firestore fetch failed, returning in-memory logs", { error: err.message });
+      }
+    }
+    let filtered = memoryAuditLogs.filter((l) => l.tenantId === tenantId);
+    if (eventType) {
+      filtered = filtered.filter((l) => l.eventType === eventType);
+    }
+    filtered.sort((a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime());
+    const total = filtered.length;
+    const totalPages = Math.ceil(total / safeLimit) || 1;
+    const startIndex = (safePage - 1) * safeLimit;
+    const paginatedData = filtered.slice(startIndex, startIndex + safeLimit);
+    return {
+      data: paginatedData,
+      total,
+      page: safePage,
+      limit: safeLimit,
+      totalPages
+    };
+  }
+  /**
+   * Utility for test suite cleanup
+   */
+  static clearMemoryLogs() {
+    memoryAuditLogs.length = 0;
+  }
+};
+
+// server/shared/utils/ipUtils.ts
+function getClientIp(req) {
+  const xForwardedFor = req.headers["x-forwarded-for"];
+  if (xForwardedFor) {
+    const rawIp = Array.isArray(xForwardedFor) ? xForwardedFor[0] : xForwardedFor;
+    const clientIp = rawIp.split(",")[0].trim();
+    if (clientIp) return clientIp;
+  }
+  const realIp = req.headers["x-real-ip"];
+  if (realIp) {
+    const rawReal = Array.isArray(realIp) ? realIp[0] : realIp;
+    if (rawReal.trim()) return rawReal.trim();
+  }
+  return req.socket.remoteAddress || "127.0.0.1";
+}
+
 // server/infrastructure/web/v2Router.ts
 var v2Router = Router();
+async function authRateLimiter(req, res, next) {
+  const ip = getClientIp(req);
+  const check = await RateLimiterService.checkRateLimit(ip);
+  if (!check.allowed) {
+    logger.warn("[AuthRateLimiter] IP blocked due to excessive failed attempts", { ip, resetInSeconds: check.resetInSeconds });
+    return res.status(429).json({
+      error: `Demasiados intentos fallidos de inicio de sesi\xF3n. Por favor espere ${check.resetInSeconds} segundos antes de reintentar.`,
+      resetInSeconds: check.resetInSeconds
+    });
+  }
+  next();
+}
+function requireAuth(req, res, next) {
+  let token;
+  const cookies = AuthService.parseCookies(req.headers.cookie);
+  if (cookies.token) {
+    token = cookies.token;
+  }
+  if (!token && req.headers.authorization) {
+    const authHeader = req.headers.authorization;
+    if (authHeader.startsWith("Bearer ")) {
+      token = authHeader.substring(7).trim();
+    } else {
+      token = authHeader.trim();
+    }
+  }
+  if (!token) {
+    return res.status(401).json({ error: "No autenticado. Cookie o Token de autorizaci\xF3n faltante." });
+  }
+  const verification = AuthService.verifyToken(token);
+  if (!verification.valid || !verification.payload) {
+    return res.status(401).json({ error: "Sesi\xF3n inv\xE1lida o expirada.", details: verification.error });
+  }
+  req.user = verification.payload;
+  next();
+}
+function requireRole(allowedRoles) {
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({ error: "Usuario no autenticado." });
+    }
+    if (!allowedRoles.includes(req.user.role)) {
+      logger.warn("[RBAC] Forbidden access attempt", { user: req.user.email, role: req.user.role, required: allowedRoles });
+      return res.status(403).json({ error: "Acceso denegado. Se requieren permisos elevados." });
+    }
+    next();
+  };
+}
+v2Router.post("/auth/login", authRateLimiter, async (req, res) => {
+  const ip = getClientIp(req);
+  const { email, password } = req.body || {};
+  if (!email || !password) {
+    return res.status(400).json({ error: "Correo y contrase\xF1a son requeridos." });
+  }
+  const configuredAdminEmail = AppConfig.auth.adminEmail.toLowerCase().trim();
+  const inputEmail = String(email).toLowerCase().trim();
+  if (inputEmail !== configuredAdminEmail) {
+    await RateLimiterService.registerFailedAttempt(ip);
+    return res.status(401).json({ error: "Credenciales inv\xE1lidas." });
+  }
+  const isValidPassword = AuthService.verifyPassword(password, AppConfig.auth.adminPasswordHash);
+  if (!isValidPassword) {
+    await RateLimiterService.registerFailedAttempt(ip);
+    return res.status(401).json({ error: "Credenciales inv\xE1lidas." });
+  }
+  await RateLimiterService.resetRateLimit(ip);
+  const user = { id: "admin-1", email: configuredAdminEmail, role: "admin" };
+  const token = AuthService.generateToken(user);
+  const cookieHeader = AuthService.createHttpOnlyCookie(token);
+  res.setHeader("Set-Cookie", cookieHeader);
+  logger.info("[Auth] Successful login for admin", { email: configuredAdminEmail, ip });
+  return res.json({
+    success: true,
+    message: "Inicio de sesi\xF3n exitoso",
+    user,
+    token
+    // Optional for external API clients
+  });
+});
+v2Router.get("/auth/me", requireAuth, (req, res) => {
+  return res.json({
+    authenticated: true,
+    user: req.user
+  });
+});
+v2Router.post("/auth/logout", (req, res) => {
+  res.setHeader("Set-Cookie", AuthService.createLogoutCookie());
+  return res.json({ success: true, message: "Sesi\xF3n cerrada correctamente" });
+});
 v2Router.get("/health", (_req, res) => {
   res.json({ status: "ok", version: "2.0.0", timestamp: (/* @__PURE__ */ new Date()).toISOString() });
 });
@@ -1208,7 +1723,7 @@ v2Router.post("/whatsapp-webhook", async (req, res) => {
   }
   return res.status(200).json({ status: "received" });
 });
-v2Router.get("/chats", async (req, res) => {
+v2Router.get("/chats", requireAuth, async (req, res) => {
   const tenantId = req.query.tenantId || AppConfig.tenant.defaultId;
   try {
     const chats = await _convRepo.findAll(tenantId);
@@ -1217,7 +1732,100 @@ v2Router.get("/chats", async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 });
-v2Router.post("/chats/:phone/toggle-bot", async (req, res) => {
+v2Router.get("/chats/trash", requireAuth, requireRole(["admin", "agent"]), async (req, res) => {
+  const tenantId = req.query.tenantId || AppConfig.tenant.defaultId;
+  try {
+    const trashedChats = await _convRepo.findTrash(tenantId);
+    return res.json(trashedChats);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+v2Router.delete("/chats/:phone", requireAuth, requireRole(["admin"]), async (req, res) => {
+  const { phone } = req.params;
+  const tenantId = req.query.tenantId || req.body?.tenantId || AppConfig.tenant.defaultId;
+  const ip = getClientIp(req);
+  try {
+    const success = await _convRepo.softDelete(tenantId, phone, req.user.email);
+    if (!success) {
+      return res.status(404).json({ error: "Chat no encontrado para archivar" });
+    }
+    await AuditLogService.logEvent({
+      eventType: "CHAT_SOFT_DELETED",
+      userEmail: req.user.email,
+      userRole: req.user.role,
+      resourceId: phone,
+      tenantId,
+      ipAddress: ip,
+      details: { action: "Soft Delete chat", phone }
+    });
+    return res.json({ success: true, message: "Chat archivado en la Papelera de Reciclaje correctamente." });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+v2Router.post("/chats/:phone/restore", requireAuth, requireRole(["admin"]), async (req, res) => {
+  const { phone } = req.params;
+  const tenantId = req.query.tenantId || req.body?.tenantId || AppConfig.tenant.defaultId;
+  const ip = getClientIp(req);
+  try {
+    const success = await _convRepo.restore(tenantId, phone);
+    if (!success) {
+      return res.status(404).json({ error: "Chat no encontrado para restaurar" });
+    }
+    await AuditLogService.logEvent({
+      eventType: "CHAT_RESTORED",
+      userEmail: req.user.email,
+      userRole: req.user.role,
+      resourceId: phone,
+      tenantId,
+      ipAddress: ip,
+      details: { action: "Restaurar chat", phone }
+    });
+    return res.json({ success: true, message: "Chat restaurado a la lista activa correctamente." });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+v2Router.post("/chats/purge-expired", requireAuth, requireRole(["admin"]), async (req, res) => {
+  const tenantId = req.query.tenantId || req.body?.tenantId || AppConfig.tenant.defaultId;
+  const retentionDays = parseInt(req.query.retentionDays || req.body?.retentionDays || "30", 10);
+  const ip = getClientIp(req);
+  try {
+    const purgedCount = await _convRepo.purgeExpiredTrash(tenantId, retentionDays);
+    if (purgedCount > 0) {
+      await AuditLogService.logEvent({
+        eventType: "TRASH_PURGED",
+        userEmail: req.user.email,
+        userRole: req.user.role,
+        resourceId: `purged_${purgedCount}_items`,
+        tenantId,
+        ipAddress: ip,
+        details: { action: "Purge Expired Trash", purgedCount, retentionDays }
+      });
+    }
+    return res.json({
+      success: true,
+      message: `Se han purgado permanentemente ${purgedCount} conversaciones archivadas con m\xE1s de ${retentionDays} d\xEDas en la papelera.`,
+      purgedCount
+    });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+v2Router.get("/audit-logs", requireAuth, requireRole(["admin"]), async (req, res) => {
+  const tenantId = req.query.tenantId || AppConfig.tenant.defaultId;
+  const page = parseInt(req.query.page || "1", 10);
+  const limit = parseInt(req.query.limit || "50", 10);
+  const eventType = req.query.eventType;
+  try {
+    const paginatedLogs = await AuditLogService.getLogs(tenantId, page, limit, eventType);
+    return res.json(paginatedLogs);
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+v2Router.post("/chats/:phone/toggle-bot", requireAuth, async (req, res) => {
   const { phone } = req.params;
   const { bot_disabled } = req.body;
   const tenantId = req.body.tenantId || AppConfig.tenant.defaultId;
@@ -1230,7 +1838,7 @@ v2Router.post("/chats/:phone/toggle-bot", async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 });
-v2Router.post("/chats/:phone/message", async (req, res) => {
+v2Router.post("/chats/:phone/message", requireAuth, async (req, res) => {
   const { phone } = req.params;
   const { text } = req.body;
   const tenantId = req.body.tenantId || AppConfig.tenant.defaultId;
@@ -1254,7 +1862,7 @@ v2Router.post("/chats/:phone/message", async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 });
-v2Router.post("/copilot/query", async (req, res) => {
+v2Router.post("/copilot/query", requireAuth, async (req, res) => {
   const { question, history } = req.body;
   const tenantId = req.body.tenantId || AppConfig.tenant.defaultId;
   if (!question) return res.status(400).json({ error: "Falta la pregunta" });
@@ -1284,7 +1892,7 @@ v2Router.post("/copilot/query", async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 });
-v2Router.get("/leads", async (req, res) => {
+v2Router.get("/leads", requireAuth, async (req, res) => {
   const tenantId = req.query.tenantId || AppConfig.tenant.defaultId;
   try {
     const leads = await _leadRepo.findAll(tenantId);
@@ -1293,7 +1901,7 @@ v2Router.get("/leads", async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 });
-v2Router.post("/leads/:id/contacted", async (req, res) => {
+v2Router.post("/leads/:id/contacted", requireAuth, async (req, res) => {
   const { id } = req.params;
   const tenantId = req.body.tenantId || AppConfig.tenant.defaultId;
   try {
@@ -1303,7 +1911,7 @@ v2Router.post("/leads/:id/contacted", async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 });
-v2Router.post("/leads/:id/notes", async (req, res) => {
+v2Router.post("/leads/:id/notes", requireAuth, async (req, res) => {
   const { id } = req.params;
   const { private_notes, tenantId } = req.body;
   const tenant = tenantId || AppConfig.tenant.defaultId;
@@ -1314,7 +1922,7 @@ v2Router.post("/leads/:id/notes", async (req, res) => {
     return res.status(500).json({ error: err.message });
   }
 });
-v2Router.post("/reset-demo", async (req, res) => {
+v2Router.post("/reset-demo", requireAuth, async (req, res) => {
   return res.json({ success: true });
 });
 
@@ -1405,9 +2013,9 @@ var isInMemory = false;
 var inMemoryChats = {};
 var inMemoryLeads = {};
 function initFirebase() {
-  if (getApps3().length > 0) {
+  if (getApps5().length > 0) {
     const dbId = firebaseConfig.firestoreDatabaseId;
-    db = dbId && dbId !== "(default)" ? getFirestore2(dbId) : getFirestore2();
+    db = dbId && dbId !== "(default)" ? getFirestore4(dbId) : getFirestore4();
     return;
   }
   try {
@@ -1428,7 +2036,7 @@ function initFirebase() {
       return;
     }
     const dbId = firebaseConfig.firestoreDatabaseId;
-    db = dbId && dbId !== "(default)" ? getFirestore2(dbId) : getFirestore2();
+    db = dbId && dbId !== "(default)" ? getFirestore4(dbId) : getFirestore4();
     console.log(`Firebase Admin SDK connected. Database ID: ${dbId || "(default)"}`);
   } catch (error) {
     console.warn("Firebase Admin SDK failed to initialize. Falling back to in-memory mode:", error);

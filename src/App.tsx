@@ -1,6 +1,6 @@
 import React, { useState, useRef } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Sparkles, Bell, BellOff, Server, Menu, ChevronLeft } from 'lucide-react';
+import { Sparkles, Bell, BellOff, Server, Menu, ChevronLeft, Loader2 } from 'lucide-react';
 
 // Tipos
 import { Chat, QualifiedLead, Message } from './types';
@@ -11,6 +11,7 @@ import { useFirebase } from './hooks/useFirebase';
 import { useSimulator } from './hooks/useSimulator';
 import { useCopilot } from './hooks/useCopilot';
 import { useLeadsManager } from './hooks/useLeadsManager';
+import { useAuth } from './hooks/useAuth';
 
 // Componentes UI extraídos (Fase 2)
 import { Sidebar } from './components/Sidebar';
@@ -18,9 +19,11 @@ import { ChatsView } from './components/ChatsView';
 import { LeadsView } from './components/LeadsView';
 import { SimulatorView } from './components/SimulatorView';
 import { CopilotView } from './components/CopilotView';
+import { LoginView } from './components/LoginView';
+import { AuditLogView } from './components/AuditLogView';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'chats' | 'leads' | 'simulator' | 'guide' | 'copilot'>('chats');
+  const [activeTab, setActiveTab] = useState<'chats' | 'leads' | 'simulator' | 'guide' | 'copilot' | 'audit'>('chats');
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   
@@ -33,6 +36,9 @@ export default function App() {
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const copilotEndRef = useRef<HTMLDivElement>(null);
+
+  // --- HOOKS DE AUTENTICACIÓN ---
+  const { user, isAuthenticated, isLoading: isAuthLoading, error: authError, login, logout } = useAuth();
 
   // --- HOOKS DE NEGOCIO ---
   const { toastMessage, showToast, notificationPermission, requestNotificationPermission, triggerBrowserNotification } = useNotifications();
@@ -61,6 +67,27 @@ export default function App() {
     handleMarkContacted, handleSaveNotes 
   } = useLeadsManager({ showToast });
 
+  // Si está verificando la sesión inicial (Cold Start)
+  if (isAuthLoading) {
+    return (
+      <div className="min-h-screen w-full bg-slate-950 flex flex-col items-center justify-center text-slate-200">
+        <Loader2 className="h-10 w-10 text-amber-400 animate-spin mb-4" />
+        <p className="text-sm font-medium tracking-wide text-slate-400">Verificando Credenciales de Seguridad...</p>
+      </div>
+    );
+  }
+
+  // Si NO está autenticado -> Renderiza Pantalla de Login (Refinamiento A)
+  if (!isAuthenticated) {
+    return (
+      <LoginView 
+        onLogin={login} 
+        isLoading={isAuthLoading} 
+        error={authError} 
+      />
+    );
+  }
+
   return (
     <div className={`flex h-screen overflow-hidden font-sans transition-colors duration-200 relative ${
       isDarkMode ? 'bg-slate-900 text-slate-100' : 'bg-gradient-to-br from-slate-50 via-white to-indigo-50/50 text-slate-800'
@@ -85,6 +112,8 @@ export default function App() {
         handleResetDemo={handleResetDemo}
         isMobileMenuOpen={isMobileMenuOpen}
         setIsMobileMenuOpen={setIsMobileMenuOpen}
+        user={user}
+        handleLogout={logout}
       />
 
       <main className="flex-1 flex flex-col overflow-hidden relative transition-colors duration-200 bg-transparent z-10">
@@ -103,9 +132,9 @@ export default function App() {
               <Menu className="h-5 w-5" />
             </button>
             <span className={`text-[10px] font-bold px-2 py-1 rounded uppercase tracking-wider ${
-              isDarkMode ? 'bg-slate-950 text-slate-400 border border-slate-850' : 'bg-slate-100 text-slate-600 border border-slate-200'
+              isDarkMode ? 'bg-slate-950 text-slate-400 border border-slate-855' : 'bg-slate-100 text-slate-600 border border-slate-200'
             }`}>
-              {activeTab === 'chats' ? '💬 Monitor de Chats' : activeTab === 'leads' ? '👥 Leads Calificados' : activeTab === 'copilot' ? '🤖 Copiloto IA (DB)' : activeTab === 'simulator' ? '🧪 Simulador' : '📚 Guía'}
+              {activeTab === 'chats' ? '💬 Monitor de Chats' : activeTab === 'leads' ? '👥 Leads Calificados' : activeTab === 'copilot' ? '🤖 Copiloto IA (DB)' : activeTab === 'simulator' ? '🧪 Simulador' : activeTab === 'audit' ? '📜 Bitácora de Auditoría' : '📚 Guía'}
             </span>
             <div className="hidden sm:flex items-center space-x-1.5 text-xs">
               <span className={isDarkMode ? 'text-slate-650' : 'text-slate-300'}>|</span>
@@ -265,6 +294,13 @@ export default function App() {
               copilotEndRef={copilotEndRef}
               chats={chats}
               leads={leads}
+            />
+          )}
+
+          {activeTab === 'audit' && (
+            <AuditLogView
+              isDarkMode={isDarkMode}
+              showToast={showToast}
             />
           )}
 

@@ -34,5 +34,13 @@ export const AppConfig = {
   },
   get appUrl() {
     return process.env.APP_URL || 'https://agente-comercial-solar.vercel.app';
+  },
+  get auth() {
+    return {
+      adminEmail: process.env.ADMIN_EMAIL || 'admin@o3energy.mx',
+      adminPasswordHash: process.env.ADMIN_PASSWORD_HASH || '',
+      jwtSecret: process.env.JWT_SECRET || 'fallback-super-secret-jwt-key-minimum-32-chars-entropy-2026',
+      tokenExpiresInHours: parseInt(process.env.JWT_EXPIRES_IN_HOURS || '8', 10),
+    };
   }
 };

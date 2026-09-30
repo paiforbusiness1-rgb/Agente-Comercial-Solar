@@ -23,7 +23,7 @@ async function runE2EPipelineTest() {
   console.log('🧪 INICIANDO PRUEBA INTEGRAL E2E DEL PIPELINE (WHATSAPP + SOFÍA)');
   console.log('===============================================================\n');
 
-  const testPhone = '526141753500';
+  const testPhone = '5216141753500';
   const testMessage = 'Hola, me puedes ayudar? Pago 4,500 al mes de luz en Chihuahua';
 
   // ─── ETAPA 1: Verificación de Variables de Entorno ───────────────────────

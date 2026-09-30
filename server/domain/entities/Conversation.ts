@@ -49,6 +49,10 @@ export interface Conversation {
   state: ConversationState;
   lastMessageAt: string;
   createdAt: string;
+  // Soft Delete fields (Fase 2)
+  status?: 'active' | 'deleted';
+  deletedAt?: string;
+  deletedBy?: string;
   // Legacy lead fields (kept for backward compat with Firestore)
   montoRecibo?: string;
   sistemaEstimado?: string;
