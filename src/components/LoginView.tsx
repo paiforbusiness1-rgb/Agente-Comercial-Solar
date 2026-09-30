@@ -6,7 +6,7 @@
 
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { Sun, ShieldCheck, Lock, Mail, AlertTriangle, ArrowRight, Loader2 } from 'lucide-react';
+import { Sun, ShieldCheck, Lock, Mail, AlertTriangle, ArrowRight, Loader2, Eye, EyeOff } from 'lucide-react';
 
 interface LoginViewProps {
   onLogin: (email: string, pass: string) => Promise<boolean>;
@@ -17,6 +17,7 @@ interface LoginViewProps {
 export const LoginView: React.FC<LoginViewProps> = ({ onLogin, isLoading, error }) => {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -108,13 +109,25 @@ export const LoginView: React.FC<LoginViewProps> = ({ onLogin, isLoading, error 
                   <Lock className="h-4 w-4" />
                 </div>
                 <input
-                  type="password"
+                  type={showPassword ? 'text' : 'password'}
                   required
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder="••••••••••••"
-                  className="w-full bg-slate-950/70 border border-slate-800/90 rounded-xl pl-10 pr-4 py-3 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-amber-500/60 focus:ring-1 focus:ring-amber-500/40 transition-all"
+                  className="w-full bg-slate-950/70 border border-slate-800/90 rounded-xl pl-10 pr-10 py-3 text-sm text-slate-100 placeholder-slate-600 focus:outline-none focus:border-amber-500/60 focus:ring-1 focus:ring-amber-500/40 transition-all"
                 />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute inset-y-0 right-0 pr-3.5 flex items-center text-slate-500 hover:text-slate-300 transition-colors focus:outline-none cursor-pointer"
+                  title={showPassword ? 'Ocultar contraseña' : 'Mostrar contraseña'}
+                >
+                  {showPassword ? (
+                    <EyeOff className="h-4 w-4 text-amber-400" />
+                  ) : (
+                    <Eye className="h-4 w-4 text-slate-500 hover:text-slate-300" />
+                  )}
+                </button>
               </div>
             </div>
 
