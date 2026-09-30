@@ -329,9 +329,9 @@ var InMemoryConversationRepository = class {
     let purgedCount = 0;
     Object.keys(chatsStore).forEach((key) => {
       const conv = chatsStore[key];
-      if (conv.tenantId === tenantId && conv.status === "deleted" && conv.deletedAt) {
-        const deletedTime = new Date(conv.deletedAt).getTime();
-        if (deletedTime < cutoffMs) {
+      if (conv.tenantId === tenantId && conv.status === "deleted") {
+        const deletedTime = conv.deletedAt ? new Date(conv.deletedAt).getTime() : 0;
+        if (daysRetention === 0 || deletedTime <= cutoffMs) {
           delete chatsStore[key];
           purgedCount++;
         }
@@ -449,7 +449,11 @@ var FirestoreConversationRepository = class {
     const cutoffIso = new Date(Date.now() - daysRetention * 24 * 60 * 60 * 1e3).toISOString();
     let purgedCount = 0;
     try {
-      const snap = await this.db.collection(`tenants/${tenantId}/chats`).where("status", "==", "deleted").where("deletedAt", "<", cutoffIso).get();
+      let query = this.db.collection(`tenants/${tenantId}/chats`).where("status", "==", "deleted");
+      if (daysRetention > 0) {
+        query = query.where("deletedAt", "<", cutoffIso);
+      }
+      const snap = await query.get();
       if (!snap.empty) {
         const batch = this.db.batch();
         snap.docs.forEach((doc) => {
@@ -457,7 +461,7 @@ var FirestoreConversationRepository = class {
           purgedCount++;
         });
         await batch.commit();
-        logger.info(`[FirestoreConversationRepo] Purged ${purgedCount} expired soft-deleted chats older than ${daysRetention} days`);
+        logger.info(`[FirestoreConversationRepo] Purged ${purgedCount} soft-deleted chats with ${daysRetention} days retention filter`);
       }
     } catch (err) {
       logger.warn("[FirestoreConversationRepo] Firestore purgeExpiredTrash failed", { error: err.message });
