@@ -450,20 +450,34 @@ var SofiaPromptBuilder = class {
    */
   static buildPrompt(ctx) {
     const systemPrompt = `Eres Sof\xEDa, Asesora Comercial de O3 Energy M\xE9xico.
-Tu personalidad es c\xE1lida, profesional, emp\xE1tica y de alta conversi\xF3n comercial.
-Tu objetivo es guiar al cliente en un flujo comercial de 6 pasos de forma fluida y natural en WhatsApp.
+Tu personalidad es c\xE1lida, emp\xE1tica, profesional y altamente orientada a brindar una excelente experiencia de usuario (U-First).
+Tu objetivo es guiar al cliente en un flujo comercial consultivo de 6 pasos en WhatsApp.
 
-REGLAS DE INTERACCI\xD3N (U-First & MCP):
-1. S\xE9 s\xFAper humana, amable y clara. Usa emojis con sutileza.
-2. NUNCA fuerces al cliente si no sabe un dato t\xE9cnico (ej: tipo de techo, distancia al medidor). Si dice "no s\xE9", "no estoy seguro", etc., responde emp\xE1ticamente ("\xA1No te preocupes! Nuestros ingenieros lo medir\xE1n en la visita t\xE9cnica gratuita") y avanza al siguiente paso.
-3. Ofrece la opci\xF3n de hablar con un agente humano cuando el usuario tenga dudas complejas o lo solicite expl\xEDcitamente.
-4. Tu respuesta DEBE SER UN OBJETO JSON V\xC1LIDO exactamente con la estructura definida a continuaci\xF3n.
+REGLAS ESENCIALES DE INTERACCI\xD3N:
+
+1. MANEJO GRACEFUL DEL NOMBRE (PASO 1):
+   - Si el cliente menciona su nombre en el mensaje inicial (ej. "Hola soy Carlos y pago $2,800 de luz"), extr\xE1elo en "client_name": "Carlos" y sal\xFAdalo por su nombre de inmediato.
+   - Si el cliente NO da su nombre (es decir, el nombre actual es "Cliente"), sal\xFAdalo c\xE1lidamente y solic\xEDtale su nombre de forma amable, pero NUNCA ignores los otros datos que ya te haya dado (ej. si dio su recibo o ubicaci\xF3n, gu\xE1rdalos).
+
+2. GATING DE CONSENTIMIENTO PARA COTIZACI\xD3N (PASO 4):
+   - Al contar con el recibo y tipo de techo, NUNCA muestres la cotizaci\xF3n masiva directamente de golpe.
+   - En su lugar, haz una pregunta de abreboca ofreciendo la cotizaci\xF3n:
+     "\xA1Excelente [Nombre]! Con un consumo de $[Monto], tu sistema ideal es de aproximadamente [N] paneles solares. \xBFTe gustar\xEDa que te presente la propuesta preliminar de inversi\xF3n y ahorro estimado?"
+   - Si el cliente responde afirmativamente ("S\xED", "Adelante", "Por favor", "Mu\xE9stramela"), establece "quote_consent_given": true.
+
+3. PROACTIVIDAD EN FINANCIAMIENTO Y RESPALDO T\xC9CNICO:
+   - Tras presentar la propuesta o en Paso 2/3, menciona que O3 Energy M\xE9xico cuenta con ingenieros certificados, 15+ a\xF1os de experiencia, app de monitoreo y garant\xEDas Tier 1. Solicita "media_to_send": "INSTALACION_PROFESIONAL".
+   - Al hablar de costos, presenta proactivamente las opciones de pago (contado vs. financiamiento con enganche desde 10%) y solicita "media_to_send": "FINANCIAMIENTO".
+
+4. RESPUESTAS LIMPIAS Y NO REPETITIVAS:
+   - Responde de forma directa a las preguntas espec\xEDficas del usuario (ej: sobre instaladores, garant\xEDas, financiamiento) sin volver a repetir la tarjeta larga de cotizaci\xF3n en cada turno.
 
 ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
 {
-  "next_step": number, // Paso actual o siguiente (1 a 6)
-  "message_to_user": "Texto del mensaje para enviar por WhatsApp",
+  "next_step": number, // Paso actual (1 a 6)
+  "message_to_user": "Texto del mensaje para WhatsApp",
   "extracted_data": {
+    "client_name": string | null,
     "bill_amount": number | null,
     "roof_type": string | null,
     "meter_distance": string | null,
@@ -471,7 +485,9 @@ ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
     "location": string | null,
     "ownership": string | null
   },
-  "trigger_human_handoff": boolean, // true si el usuario pide hablar con un agente o asesor humano
+  "quote_consent_requested": boolean,
+  "quote_consent_given": boolean,
+  "trigger_human_handoff": boolean,
   "handoff_reason": string | null,
   "media_to_send": "FINANCIAMIENTO" | "INSTALACION_PROFESIONAL" | "COTIZACION_PDF" | null
 }`;
@@ -485,6 +501,8 @@ ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
   </user_profile>
   <current_state>
     <step>${ctx.currentStep}</step>
+    <quote_consent_requested>${Boolean(ctx.quoteConsentRequested)}</quote_consent_requested>
+    <quote_consent_given>${Boolean(ctx.quoteConsentGiven)}</quote_consent_given>
     <bot_disabled>${ctx.botDisabled}</bot_disabled>
     <data_collected>${JSON.stringify(ctx.extractedData)}</data_collected>
   </current_state>
@@ -509,6 +527,8 @@ ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
         next_step: typeof parsed.next_step === "number" ? parsed.next_step : 1,
         message_to_user: parsed.message_to_user || "Hola, \xBFen qu\xE9 puedo ayudarte hoy?",
         extracted_data: parsed.extracted_data || {},
+        quote_consent_requested: Boolean(parsed.quote_consent_requested),
+        quote_consent_given: Boolean(parsed.quote_consent_given),
         trigger_human_handoff: Boolean(parsed.trigger_human_handoff),
         handoff_reason: parsed.handoff_reason || void 0,
         media_to_send: parsed.media_to_send || null
@@ -747,8 +767,10 @@ var SofiaFlowOrchestrator = class {
   async processMessage(input) {
     const { tenantId, phone, userName, messageText } = input;
     const conv = await this.conversationRepo.findByPhone(tenantId, phone);
-    if (!conv.state.completedSteps) {
-      conv.state.completedSteps = [];
+    if (!conv.state.completedSteps) conv.state.completedSteps = [];
+    if (!conv.state.mediaSentFlags) conv.state.mediaSentFlags = {};
+    if (userName && userName !== "Cliente" && conv.nombre === "Cliente") {
+      conv.nombre = userName;
     }
     if (conv.botDisabled) {
       logger.info(`[SofiaFlowOrchestrator] Bot disabled for ${phone}. Skipping automated response.`);
@@ -757,7 +779,7 @@ var SofiaFlowOrchestrator = class {
     const currentStepInt = this.phaseToStepInt(conv.state.phase);
     const promptCtx = {
       phone,
-      userName: userName || conv.nombre,
+      userName: conv.nombre,
       currentStep: currentStepInt,
       extractedData: {
         billAmount: conv.state.monthlyBill,
@@ -767,6 +789,8 @@ var SofiaFlowOrchestrator = class {
         location: conv.state.location,
         ownership: conv.state.isOwner ? "Propio" : void 0
       },
+      quoteConsentRequested: conv.state.quoteConsentRequested,
+      quoteConsentGiven: conv.state.quoteConsentGiven,
       botDisabled: conv.botDisabled,
       latestUserMessage: messageText,
       historySummary: conv.messages.slice(-6).map((m) => `${m.sender}: ${m.text}`).join("\n")
@@ -784,6 +808,9 @@ var SofiaFlowOrchestrator = class {
     const mediaSent = [];
     let finalReply = parsed.message_to_user;
     if (parsed.extracted_data) {
+      if (parsed.extracted_data.client_name && conv.nombre === "Cliente") {
+        conv.nombre = parsed.extracted_data.client_name;
+      }
       if (parsed.extracted_data.bill_amount) {
         conv.state.monthlyBill = parsed.extracted_data.bill_amount;
         conv.montoRecibo = `$${parsed.extracted_data.bill_amount} MXN`;
@@ -801,11 +828,17 @@ var SofiaFlowOrchestrator = class {
         conv.state.location = parsed.extracted_data.location;
       }
     }
-    const userExplicitlyRequestedQuote = messageText.toLowerCase().includes("cotizac") || messageText.toLowerCase().includes("presupuesto") || messageText.toLowerCase().includes("dame el precio") || messageText.toLowerCase().includes("cuanto cuesta");
+    const lowerMessage = messageText.toLowerCase().trim();
+    const explicitAffirmative = ["si", "s\xED", "adelante", "por favor", "mu\xE9stramela", "muestramela", "ver cotizacion", "ver cotizaci\xF3n", "claro"].some((k) => lowerMessage === k || lowerMessage.startsWith(k));
+    if (parsed.quote_consent_requested) {
+      conv.state.quoteConsentRequested = true;
+    }
+    if (parsed.quote_consent_given || conv.state.quoteConsentRequested && explicitAffirmative) {
+      conv.state.quoteConsentGiven = true;
+    }
     const isQuoteNotYetSent = !conv.state.completedSteps.includes("QUOTE_SENT");
-    const isEnteringStep4 = parsed.next_step === 4 || currentStepInt < 4 && parsed.next_step >= 4;
-    if (isEnteringStep4 && isQuoteNotYetSent || userExplicitlyRequestedQuote && conv.state.monthlyBill) {
-      const bill = conv.state.monthlyBill || 3500;
+    if (conv.state.quoteConsentGiven && isQuoteNotYetSent && conv.state.monthlyBill) {
+      const bill = conv.state.monthlyBill;
       const calcResult = this.quoteEngine.calculate(bill);
       const quoteDto = {
         clientName: conv.nombre || userName || "Cliente",
@@ -825,14 +858,17 @@ var SofiaFlowOrchestrator = class {
 ${parsed.message_to_user}`;
       conv.state.completedSteps.push("QUOTE_SENT");
     }
-    if (parsed.media_to_send === "FINANCIAMIENTO" && !conv.state.completedSteps.includes("MEDIA_FINANCIAMIENTO_SENT")) {
-      const imgUrl = `${AppConfig.mediaBaseUrl}/FINANCIAMIENTO.jpeg`;
-      mediaSent.push(imgUrl);
-      conv.state.completedSteps.push("MEDIA_FINANCIAMIENTO_SENT");
-    } else if (parsed.media_to_send === "INSTALACION_PROFESIONAL" && !conv.state.completedSteps.includes("MEDIA_INSTALACION_SENT")) {
+    const shouldSendInstalacion = (parsed.media_to_send === "INSTALACION_PROFESIONAL" || parsed.next_step === 2 || parsed.next_step === 3) && !conv.state.mediaSentFlags.instalacionProfessional;
+    if (shouldSendInstalacion) {
       const imgUrl = `${AppConfig.mediaBaseUrl}/INSTALACION_PROFESIONAL.jpeg`;
       mediaSent.push(imgUrl);
-      conv.state.completedSteps.push("MEDIA_INSTALACION_SENT");
+      conv.state.mediaSentFlags.instalacionProfessional = true;
+    }
+    const shouldSendFinanciamiento = (parsed.media_to_send === "FINANCIAMIENTO" || conv.state.quoteConsentGiven && parsed.next_step >= 4) && !conv.state.mediaSentFlags.financiamiento;
+    if (shouldSendFinanciamiento) {
+      const imgUrl = `${AppConfig.mediaBaseUrl}/FINANCIAMIENTO.jpeg`;
+      mediaSent.push(imgUrl);
+      conv.state.mediaSentFlags.financiamiento = true;
     }
     let isHandoff = parsed.trigger_human_handoff;
     if (messageText.toLowerCase().includes("asesor") || messageText.toLowerCase().includes("humano") || messageText.toLowerCase().includes("agente")) {

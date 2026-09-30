@@ -25,6 +25,12 @@ export interface ConversationState {
   hasShade?: boolean;
   voltage?: string;
   floors?: number;
+  quoteConsentRequested?: boolean;
+  quoteConsentGiven?: boolean;
+  mediaSentFlags?: {
+    instalacionProfessional?: boolean;
+    financiamiento?: boolean;
+  };
 }
 
 export interface Message {

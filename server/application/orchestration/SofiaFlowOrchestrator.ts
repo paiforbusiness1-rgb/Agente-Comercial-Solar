@@ -2,6 +2,7 @@
  * SofiaFlowOrchestrator.ts
  * Manages the 6-step state machine for Sofía IA (O3 Energy México).
  * Anti-God-Object Architecture: Decouples state flow, prompt building, quote generation, and handoff.
+ * Implements deterministic quote consent gating, media dispatch idempotency, and graceful name capture.
  */
 
 import { IConversationRepository } from '../../domain/repositories/IConversationRepository.js';
@@ -48,9 +49,13 @@ export class SofiaFlowOrchestrator {
     // 1. Fetch conversation state from persistent repository (Zero Regressions)
     const conv = await this.conversationRepo.findByPhone(tenantId, phone);
 
-    // Ensure state collections exist
-    if (!conv.state.completedSteps) {
-      conv.state.completedSteps = [];
+    // Ensure state collections & flags exist
+    if (!conv.state.completedSteps) conv.state.completedSteps = [];
+    if (!conv.state.mediaSentFlags) conv.state.mediaSentFlags = {};
+
+    // Update name if provided explicitly from WhatsApp profile
+    if (userName && userName !== 'Cliente' && conv.nombre === 'Cliente') {
+      conv.nombre = userName;
     }
 
     // If bot is disabled (Human Handoff Active), do not intervene automatically
@@ -65,7 +70,7 @@ export class SofiaFlowOrchestrator {
     // 2. Build MCP Prompt with XML tag encapsulation (SSD & MCP Rules)
     const promptCtx = {
       phone,
-      userName: userName || conv.nombre,
+      userName: conv.nombre,
       currentStep: currentStepInt,
       extractedData: {
         billAmount: conv.state.monthlyBill,
@@ -75,6 +80,8 @@ export class SofiaFlowOrchestrator {
         location: (conv.state as any).location,
         ownership: conv.state.isOwner ? 'Propio' : undefined,
       },
+      quoteConsentRequested: conv.state.quoteConsentRequested,
+      quoteConsentGiven: conv.state.quoteConsentGiven,
       botDisabled: conv.botDisabled,
       latestUserMessage: messageText,
       historySummary: conv.messages.slice(-6).map(m => `${m.sender}: ${m.text}`).join('\n'),
@@ -97,8 +104,11 @@ export class SofiaFlowOrchestrator {
     const mediaSent: string[] = [];
     let finalReply = parsed.message_to_user;
 
-    // 4. Update internal state from LLM extracted data
+    // 4. Update internal state & extracted data
     if (parsed.extracted_data) {
+      if (parsed.extracted_data.client_name && conv.nombre === 'Cliente') {
+        conv.nombre = parsed.extracted_data.client_name;
+      }
       if (parsed.extracted_data.bill_amount) {
         conv.state.monthlyBill = parsed.extracted_data.bill_amount;
         (conv as any).montoRecibo = `$${parsed.extracted_data.bill_amount} MXN`;
@@ -117,17 +127,23 @@ export class SofiaFlowOrchestrator {
       }
     }
 
-    // Check step 4 — dynamic quote generation ONCE per conversation flow or if explicitly re-requested
-    const userExplicitlyRequestedQuote = messageText.toLowerCase().includes('cotizac') || 
-                                         messageText.toLowerCase().includes('presupuesto') || 
-                                         messageText.toLowerCase().includes('dame el precio') ||
-                                         messageText.toLowerCase().includes('cuanto cuesta');
+    // Consent Gating Logic for Quote Generation
+    const lowerMessage = messageText.toLowerCase().trim();
+    const explicitAffirmative = ['si', 'sí', 'adelante', 'por favor', 'muéstramela', 'muestramela', 'ver cotizacion', 'ver cotización', 'claro'].some(k => lowerMessage === k || lowerMessage.startsWith(k));
 
+    if (parsed.quote_consent_requested) {
+      conv.state.quoteConsentRequested = true;
+    }
+
+    if (parsed.quote_consent_given || (conv.state.quoteConsentRequested && explicitAffirmative)) {
+      conv.state.quoteConsentGiven = true;
+    }
+
+    // Generate & Attach Quote ONLY if consent has been given AND quote not yet sent
     const isQuoteNotYetSent = !conv.state.completedSteps.includes('QUOTE_SENT');
-    const isEnteringStep4 = parsed.next_step === 4 || (currentStepInt < 4 && parsed.next_step >= 4);
 
-    if ((isEnteringStep4 && isQuoteNotYetSent) || (userExplicitlyRequestedQuote && conv.state.monthlyBill)) {
-      const bill = conv.state.monthlyBill || 3500;
+    if (conv.state.quoteConsentGiven && isQuoteNotYetSent && conv.state.monthlyBill) {
+      const bill = conv.state.monthlyBill;
       const calcResult = this.quoteEngine.calculate(bill);
 
       const quoteDto = {
@@ -148,18 +164,26 @@ export class SofiaFlowOrchestrator {
       conv.state.completedSteps.push('QUOTE_SENT');
     }
 
-    // Check media dispatch — send ONCE per media type to avoid duplicate attachments
-    if (parsed.media_to_send === 'FINANCIAMIENTO' && !conv.state.completedSteps.includes('MEDIA_FINANCIAMIENTO_SENT')) {
-      const imgUrl = `${AppConfig.mediaBaseUrl}/FINANCIAMIENTO.jpeg`;
-      mediaSent.push(imgUrl);
-      conv.state.completedSteps.push('MEDIA_FINANCIAMIENTO_SENT');
-    } else if (parsed.media_to_send === 'INSTALACION_PROFESIONAL' && !conv.state.completedSteps.includes('MEDIA_INSTALACION_SENT')) {
+    // 5. Idempotent Media Dispatch (Anti-Spam)
+    // Instación Profesional (Step 2/3)
+    const shouldSendInstalacion = (parsed.media_to_send === 'INSTALACION_PROFESIONAL' || parsed.next_step === 2 || parsed.next_step === 3) &&
+                                  !conv.state.mediaSentFlags.instalacionProfessional;
+    if (shouldSendInstalacion) {
       const imgUrl = `${AppConfig.mediaBaseUrl}/INSTALACION_PROFESIONAL.jpeg`;
       mediaSent.push(imgUrl);
-      conv.state.completedSteps.push('MEDIA_INSTALACION_SENT');
+      conv.state.mediaSentFlags.instalacionProfessional = true;
     }
 
-    // 5. Check Human Handoff trigger
+    // Financiamiento (Step 4/5)
+    const shouldSendFinanciamiento = (parsed.media_to_send === 'FINANCIAMIENTO' || (conv.state.quoteConsentGiven && parsed.next_step >= 4)) &&
+                                    !conv.state.mediaSentFlags.financiamiento;
+    if (shouldSendFinanciamiento) {
+      const imgUrl = `${AppConfig.mediaBaseUrl}/FINANCIAMIENTO.jpeg`;
+      mediaSent.push(imgUrl);
+      conv.state.mediaSentFlags.financiamiento = true;
+    }
+
+    // 6. Check Human Handoff trigger
     let isHandoff = parsed.trigger_human_handoff;
     if (messageText.toLowerCase().includes('asesor') || messageText.toLowerCase().includes('humano') || messageText.toLowerCase().includes('agente')) {
       isHandoff = true;
@@ -181,7 +205,7 @@ export class SofiaFlowOrchestrator {
     conv.messages.push({ sender: 'bot', text: finalReply, timestamp: new Date().toISOString() });
     conv.lastMessageAt = new Date().toISOString();
 
-    // 6. Save state to repository
+    // 7. Save state to repository (Persistent Database)
     await this.conversationRepo.save(conv);
 
     return {

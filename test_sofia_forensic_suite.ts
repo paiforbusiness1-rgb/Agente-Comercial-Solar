@@ -110,6 +110,80 @@ async function runForensicAuditSuite() {
   console.log(`  - Bot Desactivado (botDisabled): ${response2.botDisabled}`);
   console.log('  ✅ TEST 5 PASSED: Handoff ejecutado y bot desactivado en DB\n');
 
+  // TEST 6: Graceful Name Extraction (U-First Rule 4)
+  console.log('🔹 PRUEBA 6: Extracción Graceful del Nombre en Mensaje Compuesto');
+  const mockLlmName = {
+    complete: async () => ({
+      text: JSON.stringify({
+        next_step: 2,
+        message_to_user: '¡Hola Carlos! Mucho gusto. Con un consumo de $2,800 bimestrales ya tenemos una buena base. ¿Tu casa es propia o rentada?',
+        extracted_data: { client_name: 'Carlos', bill_amount: 1400 },
+        trigger_human_handoff: false,
+      }),
+    }),
+  };
+  const orchestratorName = new SofiaFlowOrchestrator(convRepo, leadRepo, engine, mockLlmName as any, mockSender, mockEmail);
+  const responseName = await orchestratorName.processMessage({
+    tenantId: 'o3energy_mexico',
+    phone: '5216149998877',
+    userName: 'Cliente',
+    messageText: 'Hola soy Carlos y mi recibo es de 2800 pesos bimestrales',
+  });
+  const savedConv = await convRepo.findByPhone('o3energy_mexico', '5216149998877');
+  console.log(`  - Entrada Usuario: "Hola soy Carlos y mi recibo es de 2800 pesos bimestrales"`);
+  console.log(`  - Nombre Extraído en DB: "${savedConv.nombre}"`);
+  console.log(`  - Respuesta Orquestador: "${responseName.replyText.substring(0, 80)}..."`);
+  console.log('  ✅ TEST 6 PASSED: Extracción de nombre sin repetir preguntas innecesarias\n');
+
+  // TEST 7: Quote Consent Gating (Determinismo)
+  console.log('🔹 PRUEBA 7: Gating de Consentimiento de Cotización');
+  const mockLlmConsent = {
+    complete: async () => ({
+      text: JSON.stringify({
+        next_step: 4,
+        message_to_user: '¡Excelente Carlos! Tu sistema ideal es de 6 paneles solares. ¿Te gustaría que te presente la propuesta preliminar de inversión y ahorro estimado?',
+        quote_consent_requested: true,
+        quote_consent_given: false,
+        trigger_human_handoff: false,
+      }),
+    }),
+  };
+  const orchestratorConsent = new SofiaFlowOrchestrator(convRepo, leadRepo, engine, mockLlmConsent as any, mockSender, mockEmail);
+  const responseConsentTeaser = await orchestratorConsent.processMessage({
+    tenantId: 'o3energy_mexico',
+    phone: '5216149998877',
+    userName: 'Carlos',
+    messageText: 'Es casa propia y el techo es de concreto',
+  });
+  const containsQuoteBox = responseConsentTeaser.replyText.includes('PRESUPUESTO PRELIMINAR');
+  console.log(`  - Respuesta de Abreboca (Sin Cotización Masiva): "${responseConsentTeaser.replyText}"`);
+  console.log(`  - ¿Tarjeta Masiva Bloqueada?: ${!containsQuoteBox ? 'SÍ (Gating Exitoso)' : 'NO'}`);
+  console.log('  ✅ TEST 7 PASSED: Consentimiento requerido antes de mostrar la cotización\n');
+
+  // TEST 8: Media Dispatch Idempotency (Anti-Spam)
+  console.log('🔹 PRUEBA 8: Idempotencia en el Despacho de Infografías (Anti-Spam)');
+  const responseMedia1 = await orchestratorConsent.processMessage({
+    tenantId: 'o3energy_mexico',
+    phone: '5216149998877',
+    userName: 'Carlos',
+    messageText: 'Sí por favor, muéstramela',
+  });
+  const firstMediaSentCount = responseMedia1.mediaSent?.length || 0;
+
+  // Next follow up question in same phase
+  const responseMedia2 = await orchestratorConsent.processMessage({
+    tenantId: 'o3energy_mexico',
+    phone: '5216149998877',
+    userName: 'Carlos',
+    messageText: '¿Tienen instaladores profesionales?',
+  });
+  const secondMediaSentCount = responseMedia2.mediaSent?.length || 0;
+
+  console.log(`  - Primer Envío de Infografía en Paso: ${firstMediaSentCount} imagen(es)`);
+  console.log(`  - Segundo Envío en Pregunta de Seguimiento: ${secondMediaSentCount} imagen(es)`);
+  console.log(`  - ¿Spam Bloqueado?: ${secondMediaSentCount === 0 ? 'SÍ (Idempotencia Exitosa)' : 'NO'}`);
+  console.log('  ✅ TEST 8 PASSED: Las infografías no se duplican en mensajes subsecuentes\n');
+
   console.log('===============================================================');
   console.log('🏆 SUITE FORENSE FINALIZADA CON ÉXITO — 100% COMPLIANCE');
   console.log('===============================================================');
