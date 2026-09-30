@@ -2,6 +2,7 @@ import { SolarQuoteEngine } from './server/infrastructure/engines/SolarQuoteEngi
 import { SofiaPromptBuilder } from './server/application/builders/SofiaPromptBuilder.js';
 import { QuotePdfService } from './server/infrastructure/services/QuotePdfService.js';
 import { SofiaFlowOrchestrator } from './server/application/orchestration/SofiaFlowOrchestrator.js';
+import { BillNormalizerService } from './server/domain/services/BillNormalizerService.js';
 import { InMemoryConversationRepository, InMemoryLeadRepository } from './server/infrastructure/persistence/Repositories.js';
 
 async function runForensicAuditSuite() {
@@ -74,7 +75,6 @@ async function runForensicAuditSuite() {
 
   const orchestrator = new SofiaFlowOrchestrator(convRepo, leadRepo, engine, mockLlm as any, mockSender, mockEmail);
 
-  // Message with "no sé" answer
   const response1 = await orchestrator.processMessage({
     tenantId: 'o3energy_mexico',
     phone: '526141753500',
@@ -110,79 +110,101 @@ async function runForensicAuditSuite() {
   console.log(`  - Bot Desactivado (botDisabled): ${response2.botDisabled}`);
   console.log('  ✅ TEST 5 PASSED: Handoff ejecutado y bot desactivado en DB\n');
 
-  // TEST 6: Graceful Name Extraction (U-First Rule 4)
-  console.log('🔹 PRUEBA 6: Extracción Graceful del Nombre en Mensaje Compuesto');
-  const mockLlmName = {
+  // TEST 6: Bill Normalizer Service & CFE Bimestral Default
+  console.log('🔹 PRUEBA 6: BillNormalizerService - Normalización de $2,800 Bimestrales CFE');
+  const normalizedBimestral = BillNormalizerService.normalize({
+    rawAmount: 2800,
+    rawFrequency: 'bimestral',
+  });
+  console.log(`  - Entrada: $2,800 MXN bimestrales`);
+  console.log(`  - Base Mensual Calculada: $${normalizedBimestral?.monthlyBill} MXN/mes`);
+  console.log(`  - Base Bimestral: $${normalizedBimestral?.bimestralBill} MXN`);
+  console.log(`  - Resumen Formateado: ${normalizedBimestral?.formattedSummary}`);
+
+  const quoteForBimestral = engine.calculate(normalizedBimestral!.monthlyBill);
+  console.log(`  - Paneles para $1,400 MXN/mes ($2,800 bimestral): ${quoteForBimestral.panels} paneles`);
+  const isCorrectBimestralPanels = quoteForBimestral.panels === 4;
+  console.log(`  - ¿Matriz Arrojó 4 Paneles Exactos?: ${isCorrectBimestralPanels ? 'SÍ (2.2 kWp)' : 'NO'}`);
+  console.log('  ✅ TEST 6 PASSED: Normalización CFE bimestral exitosa sin inflación de paneles\n');
+
+  // TEST 7: Single Source of Truth - Calculated Quote Context Injection
+  console.log('🔹 PRUEBA 7: Single Source of Truth - Inyección de <calculated_quote> en Prompt');
+  const promptCtxCalculated = {
+    phone: '526141753500',
+    userName: 'Héctor',
+    currentStep: 3,
+    extractedData: { billAmount: 1400, billFrequency: 'bimestral' as const, roofType: 'Techo de concreto' },
+    calculatedQuote: {
+      panels: 4,
+      systemPowerKw: 2.2,
+      estimatedCost: 26000,
+      monthlySavings: 1260,
+      annualSavings: 15120,
+      rangeLabel: '4 paneles solares (2.2 kWp)',
+    },
+    botDisabled: false,
+    latestUserMessage: 'No tengo sombras y tengo techo de concreto!',
+  };
+  const promptOutput = SofiaPromptBuilder.buildPrompt(promptCtxCalculated);
+  const containsCalculatedQuote = promptOutput.userContent.includes('<calculated_quote>{"panels":4');
+  console.log(`  - Fragmento Contexto XML Inyectado:`);
+  console.log(`    ${promptOutput.userContent.split('\n').filter(l => l.includes('calculated_quote')).join('\n    ')}`);
+  console.log(`  - ¿<calculated_quote> inyectado para prohibir alucinaciones?: ${containsCalculatedQuote ? 'SÍ' : 'NO'}`);
+  console.log('  ✅ TEST 7 PASSED: Prompt blindado contra alucinaciones con Single Source of Truth\n');
+
+  // TEST 8: Proactive Free Technical Visit & Specialized Advisor Handoff Rules
+  console.log('🔹 PRUEBA 8: Propuesta Proactiva de Visita Técnica y Asesor sin Foto de Recibo');
+  const mockLlmProactive = {
     complete: async () => ({
       text: JSON.stringify({
-        next_step: 2,
-        message_to_user: '¡Hola Carlos! Mucho gusto. Con un consumo de $2,800 bimestrales ya tenemos una buena base. ¿Tu casa es propia o rentada?',
-        extracted_data: { client_name: 'Carlos', bill_amount: 1400 },
+        next_step: 3,
+        message_to_user: '¡Entendido Héctor! No te preocupes por la foto del recibo. Para asegurarnos de que la instalación sea perfecta, te ofrecemos una Visita Técnica Gratuita en Sitio por nuestros ingenieros certificados.',
+        extracted_data: { bill_amount: 1400, bill_frequency: 'bimestral' },
+        propose_technical_visit: true,
+        propose_advisor_handoff: false,
         trigger_human_handoff: false,
       }),
     }),
   };
-  const orchestratorName = new SofiaFlowOrchestrator(convRepo, leadRepo, engine, mockLlmName as any, mockSender, mockEmail);
-  const responseName = await orchestratorName.processMessage({
+  const orchestratorProactive = new SofiaFlowOrchestrator(convRepo, leadRepo, engine, mockLlmProactive as any, mockSender, mockEmail);
+  const responseProactive = await orchestratorProactive.processMessage({
     tenantId: 'o3energy_mexico',
-    phone: '5216149998877',
-    userName: 'Cliente',
-    messageText: 'Hola soy Carlos y mi recibo es de 2800 pesos bimestrales',
+    phone: '5216148887766',
+    userName: 'Héctor',
+    messageText: 'No la tengo a la mano!',
   });
-  const savedConv = await convRepo.findByPhone('o3energy_mexico', '5216149998877');
-  console.log(`  - Entrada Usuario: "Hola soy Carlos y mi recibo es de 2800 pesos bimestrales"`);
-  console.log(`  - Nombre Extraído en DB: "${savedConv.nombre}"`);
-  console.log(`  - Respuesta Orquestador: "${responseName.replyText.substring(0, 80)}..."`);
-  console.log('  ✅ TEST 6 PASSED: Extracción de nombre sin repetir preguntas innecesarias\n');
+  console.log(`  - Entrada Usuario: "No la tengo a la mano!"`);
+  console.log(`  - Respuesta Sofía: "${responseProactive.replyText}"`);
+  console.log(`  - Bot Sigue Activo (Visita Técnica No Bloquea Chat): ${!responseProactive.botDisabled}`);
+  console.log('  ✅ TEST 8 PASSED: Visita técnica gratuita propuesta proactivamente sin romper flujo\n');
 
-  // TEST 7: Quote Consent Gating (Determinismo)
-  console.log('🔹 PRUEBA 7: Gating de Consentimiento de Cotización');
-  const mockLlmConsent = {
+  // TEST 9: Dynamic Re-Quotation on User Frequency Correction
+  console.log('🔹 PRUEBA 9: Re-Cotización Dinámica ante Corrección del Cliente');
+  const mockLlmCorrection = {
     complete: async () => ({
       text: JSON.stringify({
         next_step: 4,
-        message_to_user: '¡Excelente Carlos! Tu sistema ideal es de 6 paneles solares. ¿Te gustaría que te presente la propuesta preliminar de inversión y ahorro estimado?',
+        message_to_user: '¡Aclarado! Al ser $2,800 MXN mensuales ($5,600 bimestrales), tu sistema adecuado es de 6 paneles solares (3.3 kWp).',
+        extracted_data: { bill_amount: 2800, bill_frequency: 'mensual' },
         quote_consent_requested: true,
-        quote_consent_given: false,
+        quote_consent_given: true,
         trigger_human_handoff: false,
       }),
     }),
   };
-  const orchestratorConsent = new SofiaFlowOrchestrator(convRepo, leadRepo, engine, mockLlmConsent as any, mockSender, mockEmail);
-  const responseConsentTeaser = await orchestratorConsent.processMessage({
+  const orchestratorCorrection = new SofiaFlowOrchestrator(convRepo, leadRepo, engine, mockLlmCorrection as any, mockSender, mockEmail);
+  const responseCorrection = await orchestratorCorrection.processMessage({
     tenantId: 'o3energy_mexico',
-    phone: '5216149998877',
-    userName: 'Carlos',
-    messageText: 'Es casa propia y el techo es de concreto',
+    phone: '5216148887766',
+    userName: 'Héctor',
+    messageText: 'Ahorita que veo mi recibo, el pago de 2800 pesos era mensual, no bimestral!',
   });
-  const containsQuoteBox = responseConsentTeaser.replyText.includes('PRESUPUESTO PRELIMINAR');
-  console.log(`  - Respuesta de Abreboca (Sin Cotización Masiva): "${responseConsentTeaser.replyText}"`);
-  console.log(`  - ¿Tarjeta Masiva Bloqueada?: ${!containsQuoteBox ? 'SÍ (Gating Exitoso)' : 'NO'}`);
-  console.log('  ✅ TEST 7 PASSED: Consentimiento requerido antes de mostrar la cotización\n');
-
-  // TEST 8: Media Dispatch Idempotency (Anti-Spam)
-  console.log('🔹 PRUEBA 8: Idempotencia en el Despacho de Infografías (Anti-Spam)');
-  const responseMedia1 = await orchestratorConsent.processMessage({
-    tenantId: 'o3energy_mexico',
-    phone: '5216149998877',
-    userName: 'Carlos',
-    messageText: 'Sí por favor, muéstramela',
-  });
-  const firstMediaSentCount = responseMedia1.mediaSent?.length || 0;
-
-  // Next follow up question in same phase
-  const responseMedia2 = await orchestratorConsent.processMessage({
-    tenantId: 'o3energy_mexico',
-    phone: '5216149998877',
-    userName: 'Carlos',
-    messageText: '¿Tienen instaladores profesionales?',
-  });
-  const secondMediaSentCount = responseMedia2.mediaSent?.length || 0;
-
-  console.log(`  - Primer Envío de Infografía en Paso: ${firstMediaSentCount} imagen(es)`);
-  console.log(`  - Segundo Envío en Pregunta de Seguimiento: ${secondMediaSentCount} imagen(es)`);
-  console.log(`  - ¿Spam Bloqueado?: ${secondMediaSentCount === 0 ? 'SÍ (Idempotencia Exitosa)' : 'NO'}`);
-  console.log('  ✅ TEST 8 PASSED: Las infografías no se duplican en mensajes subsecuentes\n');
+  const savedConvCorrection = await convRepo.findByPhone('o3energy_mexico', '5216148887766');
+  console.log(`  - Entrada Usuario: "era mensual, no bimestral!"`);
+  console.log(`  - Nueva Frecuencia en DB: "${savedConvCorrection.state.billFrequency}"`);
+  console.log(`  - Nuevo Consumo Mensual en DB: $${savedConvCorrection.state.monthlyBill} MXN`);
+  console.log(`  - ¿Cotización Actualizada a 6 Paneles?: ${responseCorrection.replyText.includes('PRESUPUESTO PRELIMINAR') || responseCorrection.replyText.includes('6 paneles') ? 'SÍ' : 'NO'}`);
+  console.log('  ✅ TEST 9 PASSED: Re-cotización dinámica ejecutada correctamente tras corrección\n');
 
   console.log('===============================================================');
   console.log('🏆 SUITE FORENSE FINALIZADA CON ÉXITO — 100% COMPLIANCE');

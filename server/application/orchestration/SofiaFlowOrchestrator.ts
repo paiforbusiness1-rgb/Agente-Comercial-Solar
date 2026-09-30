@@ -2,16 +2,18 @@
  * SofiaFlowOrchestrator.ts
  * Manages the 6-step state machine for Sofía IA (O3 Energy México).
  * Anti-God-Object Architecture: Decouples state flow, prompt building, quote generation, and handoff.
- * Implements deterministic quote consent gating, media dispatch idempotency, and graceful name capture.
+ * Implements deterministic quote consent gating, media dispatch idempotency, graceful name capture,
+ * single-pass Single Source of Truth calculation injection, and BillNormalizerService integration.
  */
 
 import { IConversationRepository } from '../../domain/repositories/IConversationRepository.js';
 import { ILeadRepository } from '../../domain/repositories/ILeadRepository.js';
 import { Lead } from '../../domain/entities/Lead.js';
-import { IQuoteEngine } from '../../interfaces/IQuoteEngine.js';
+import { IQuoteEngine, QuoteResult } from '../../interfaces/IQuoteEngine.js';
 import { ILLMProvider } from '../../interfaces/ILLMProvider.js';
 import { SofiaPromptBuilder, SofiaLlmResponse } from '../builders/SofiaPromptBuilder.js';
 import { QuotePdfService } from '../../infrastructure/services/QuotePdfService.js';
+import { BillNormalizerService } from '../../domain/services/BillNormalizerService.js';
 import { AppConfig } from '../../shared/config/AppConfig.js';
 import { logger } from '../../shared/logger/ConsoleLogger.js';
 
@@ -67,19 +69,51 @@ export class SofiaFlowOrchestrator {
     // Determine step integer (1 to 6)
     const currentStepInt = this.phaseToStepInt(conv.state.phase);
 
-    // 2. Build MCP Prompt with XML tag encapsulation (SSD & MCP Rules)
+    // 2. Pre-Parse User Message for Bill Amount & Frequency (Single-Pass Zero-Latency)
+    const preParsedBill = BillNormalizerService.normalize({
+      rawAmount: conv.state.monthlyBill ? (conv.state.billFrequency === 'bimestral' ? (conv.state.bimestralBill || conv.state.monthlyBill * 2) : conv.state.monthlyBill) : null,
+      rawFrequency: conv.state.billFrequency,
+      messageText,
+    });
+
+    if (preParsedBill) {
+      conv.state.monthlyBill = preParsedBill.monthlyBill;
+      conv.state.bimestralBill = preParsedBill.bimestralBill;
+      conv.state.billFrequency = preParsedBill.frequency;
+      (conv as any).montoRecibo = preParsedBill.formattedSummary;
+    }
+
+    // Pre-Calculate Quote as Single Source of Truth (Prevent LLM Text Hallucinations)
+    let calculatedQuoteInfo: { panels: number; systemPowerKw: number; estimatedCost: number; monthlySavings: number; annualSavings: number; rangeLabel: string } | null = null;
+    let preCalcResult: QuoteResult | null = null;
+
+    if (conv.state.monthlyBill) {
+      preCalcResult = this.quoteEngine.calculate(conv.state.monthlyBill, (conv.state as any).extraLoads);
+      calculatedQuoteInfo = {
+        panels: preCalcResult.panels,
+        systemPowerKw: preCalcResult.systemPowerKw,
+        estimatedCost: preCalcResult.estimatedCost,
+        monthlySavings: preCalcResult.monthlySavings,
+        annualSavings: preCalcResult.annualSavings,
+        rangeLabel: preCalcResult.systemDescription,
+      };
+    }
+
+    // 3. Build MCP Prompt with XML tag encapsulation and pre-calculated quote context
     const promptCtx = {
       phone,
       userName: conv.nombre,
       currentStep: currentStepInt,
       extractedData: {
         billAmount: conv.state.monthlyBill,
+        billFrequency: conv.state.billFrequency,
         roofType: conv.state.roofType,
         meterDistance: (conv.state as any).meterDistance,
         extraLoads: (conv.state as any).extraLoads,
         location: (conv.state as any).location,
         ownership: conv.state.isOwner ? 'Propio' : undefined,
       },
+      calculatedQuote: calculatedQuoteInfo,
       quoteConsentRequested: conv.state.quoteConsentRequested,
       quoteConsentGiven: conv.state.quoteConsentGiven,
       botDisabled: conv.botDisabled,
@@ -89,7 +123,7 @@ export class SofiaFlowOrchestrator {
 
     const { systemPrompt, userContent } = SofiaPromptBuilder.buildPrompt(promptCtx);
 
-    // 3. Invoke LLM Provider
+    // 4. Invoke LLM Provider
     const rawLlmOutput = await this.llmProvider.complete(
       [
         { role: 'system', content: systemPrompt },
@@ -104,15 +138,34 @@ export class SofiaFlowOrchestrator {
     const mediaSent: string[] = [];
     let finalReply = parsed.message_to_user;
 
-    // 4. Update internal state & extracted data
+    // 5. Reconcile extracted data from LLM response
     if (parsed.extracted_data) {
       if (parsed.extracted_data.client_name && conv.nombre === 'Cliente') {
         conv.nombre = parsed.extracted_data.client_name;
       }
+
+      // Re-normalize if LLM extracted or updated bill amount/frequency
       if (parsed.extracted_data.bill_amount) {
-        conv.state.monthlyBill = parsed.extracted_data.bill_amount;
-        (conv as any).montoRecibo = `$${parsed.extracted_data.bill_amount} MXN`;
+        const normalized = BillNormalizerService.normalize({
+          rawAmount: parsed.extracted_data.bill_amount,
+          rawFrequency: parsed.extracted_data.bill_frequency,
+          messageText,
+        });
+
+        if (normalized) {
+          const billChanged = conv.state.monthlyBill !== normalized.monthlyBill;
+          conv.state.monthlyBill = normalized.monthlyBill;
+          conv.state.bimestralBill = normalized.bimestralBill;
+          conv.state.billFrequency = normalized.frequency;
+          (conv as any).montoRecibo = normalized.formattedSummary;
+
+          // Dynamic Re-Quotation: If user corrected bill/frequency, clear QUOTE_SENT flag
+          if (billChanged && conv.state.completedSteps.includes('QUOTE_SENT')) {
+            conv.state.completedSteps = conv.state.completedSteps.filter(step => step !== 'QUOTE_SENT');
+          }
+        }
       }
+
       if (parsed.extracted_data.roof_type) {
         conv.state.roofType = parsed.extracted_data.roof_type;
       }
@@ -139,12 +192,17 @@ export class SofiaFlowOrchestrator {
       conv.state.quoteConsentGiven = true;
     }
 
+    // Track technical visit proposal flag
+    if (parsed.propose_technical_visit) {
+      conv.state.technicalVisitProposed = true;
+    }
+
     // Generate & Attach Quote ONLY if consent has been given AND quote not yet sent
     const isQuoteNotYetSent = !conv.state.completedSteps.includes('QUOTE_SENT');
 
     if (conv.state.quoteConsentGiven && isQuoteNotYetSent && conv.state.monthlyBill) {
       const bill = conv.state.monthlyBill;
-      const calcResult = this.quoteEngine.calculate(bill);
+      const calcResult = this.quoteEngine.calculate(bill, (conv.state as any).extraLoads);
 
       const quoteDto = {
         clientName: conv.nombre || userName || 'Cliente',
@@ -164,8 +222,8 @@ export class SofiaFlowOrchestrator {
       conv.state.completedSteps.push('QUOTE_SENT');
     }
 
-    // 5. Idempotent Media Dispatch (Anti-Spam)
-    // Instación Profesional (Step 2/3)
+    // 6. Idempotent Media Dispatch (Anti-Spam)
+    // Instalación Profesional (Step 2/3)
     const shouldSendInstalacion = (parsed.media_to_send === 'INSTALACION_PROFESIONAL' || parsed.next_step === 2 || parsed.next_step === 3) &&
                                   !conv.state.mediaSentFlags.instalacionProfessional;
     if (shouldSendInstalacion) {
@@ -183,8 +241,8 @@ export class SofiaFlowOrchestrator {
       conv.state.mediaSentFlags.financiamiento = true;
     }
 
-    // 6. Check Human Handoff trigger
-    let isHandoff = parsed.trigger_human_handoff;
+    // 7. Check Human Handoff trigger
+    let isHandoff = parsed.trigger_human_handoff || parsed.propose_advisor_handoff;
     if (messageText.toLowerCase().includes('asesor') || messageText.toLowerCase().includes('humano') || messageText.toLowerCase().includes('agente')) {
       isHandoff = true;
     }
@@ -192,6 +250,7 @@ export class SofiaFlowOrchestrator {
     if (isHandoff) {
       conv.botDisabled = true;
       conv.state.phase = 'HUMAN_HANDOFF';
+      conv.state.advisorHandoffProposed = true;
       finalReply = `¡Con mucho gusto! En un momento uno de nuestros asesores especializados de O3 Energy se pondrá en contacto contigo directamente a través de este chat para brindarte atención personalizada. ☀️\n\n¡Que tengas un excelente día!`;
 
       // Save lead and alert sales team via email
@@ -205,7 +264,7 @@ export class SofiaFlowOrchestrator {
     conv.messages.push({ sender: 'bot', text: finalReply, timestamp: new Date().toISOString() });
     conv.lastMessageAt = new Date().toISOString();
 
-    // 7. Save state to repository (Persistent Database)
+    // 8. Save state to repository (Persistent Database)
     await this.conversationRepo.save(conv);
 
     return {

@@ -557,28 +557,41 @@ var SofiaPromptBuilder = class {
    * Builds system prompt and XML-delimited user context for Sofía IA.
    */
   static buildPrompt(ctx) {
+    const calculatedQuoteStr = ctx.calculatedQuote ? JSON.stringify(ctx.calculatedQuote) : "No disponible a\xFAn (requiere monto de recibo)";
     const systemPrompt = `Eres Sof\xEDa, Asesora Comercial de O3 Energy M\xE9xico.
 Tu personalidad es c\xE1lida, emp\xE1tica, profesional y altamente orientada a brindar una excelente experiencia de usuario (U-First).
 Tu objetivo es guiar al cliente en un flujo comercial consultivo de 6 pasos en WhatsApp.
 
-REGLAS ESENCIALES DE INTERACCI\xD3N:
+REGLAS ESENCIALES DE INTERACCI\xD3N Y CERO ALUCINACI\xD3N:
 
 1. MANEJO GRACEFUL DEL NOMBRE (PASO 1):
    - Si el cliente menciona su nombre en el mensaje inicial (ej. "Hola soy Carlos y pago $2,800 de luz"), extr\xE1elo en "client_name": "Carlos" y sal\xFAdalo por su nombre de inmediato.
-   - Si el cliente NO da su nombre (es decir, el nombre actual es "Cliente"), sal\xFAdalo c\xE1lidamente y solic\xEDtale su nombre de forma amable, pero NUNCA ignores los otros datos que ya te haya dado (ej. si dio su recibo o ubicaci\xF3n, gu\xE1rdalos).
+   - Si el cliente NO da su nombre (es decir, el nombre actual es "Cliente"), sal\xFAdalo c\xE1lidamente y solic\xEDtale su nombre de forma amable, pero NUNCA ignores los otros datos que ya te haya dado.
 
-2. GATING DE CONSENTIMIENTO PARA COTIZACI\xD3N (PASO 4):
-   - Al contar con el recibo y tipo de techo, NUNCA muestres la cotizaci\xF3n masiva directamente de golpe.
-   - En su lugar, haz una pregunta de abreboca ofreciendo la cotizaci\xF3n:
-     "\xA1Excelente [Nombre]! Con un consumo de $[Monto], tu sistema ideal es de aproximadamente [N] paneles solares. \xBFTe gustar\xEDa que te presente la propuesta preliminar de inversi\xF3n y ahorro estimado?"
+2. CERO ALUCINACI\xD3N DE PANELES Y N\xDAMEROS (FUENTE \xDANICA DE LA VERDAD):
+   - NUNCA inventes o menciones una cantidad de paneles solares o montos si NO dispones de los valores calculados en <calculated_quote>.
+   - Si <calculated_quote> contiene datos, utiliza EXCLUSIVAMENTE esa cifra de paneles (ej. si indica 4 paneles, menciona 4 paneles; si indica 6 paneles, menciona 6 paneles).
+   - Si el usuario pregunta cu\xE1ntos paneles necesita ANTES de indicar su recibo, responde con elegancia: "Para darte el n\xFAmero exacto de paneles y el costo de tu inversi\xF3n, necesito conocer tu consumo mensual o bimestral en pesos de tu recibo CFE. \xBFCu\xE1nto pagas aproximadamente?" NUNCA inventes un n\xFAmero de paneles.
+
+3. CONVERSI\xD3N Y DESGLOSE TRANSPARENTE DE RECI BOS CFE (BIMESTRAL VS. MENSUAL):
+   - En M\xE9xico los recibos CFE son habitualmente BIMESTRALES.
+   - Si el usuario menciona un monto (ej. $2,800) y no aclara frecuencia, o si dice "bimestral", extrae "bill_frequency": "bimestral".
+   - Al responder, desglosa SIEMPRE de forma clara y transparente la equivalencia: "Tu recibo bimestral de $2,800 MXN equivale a $1,400 MXN al mes. Con este consumo, tu sistema ideal es de [N de <calculated_quote>] paneles solares...".
+
+4. GATING DE CONSENTIMIENTO PARA COTIZACI\xD3N (PASO 4):
+   - Al contar con el recibo y tipo de techo, no muestres la cotizaci\xF3n masiva directamente de golpe.
+   - Haz una pregunta de abreboca ofreciendo la cotizaci\xF3n:
+     "\xA1Excelente [Nombre]! Con un consumo de $[Monto], tu sistema ideal es de aproximadamente [N] paneles solares de alta eficiencia. \xBFTe gustar\xEDa que te presente la propuesta preliminar de inversi\xF3n y ahorro estimado?"
    - Si el cliente responde afirmativamente ("S\xED", "Adelante", "Por favor", "Mu\xE9stramela"), establece "quote_consent_given": true.
 
-3. PROACTIVIDAD EN FINANCIAMIENTO Y RESPALDO T\xC9CNICO:
-   - Tras presentar la propuesta o en Paso 2/3, menciona que O3 Energy M\xE9xico cuenta con ingenieros certificados, 15+ a\xF1os de experiencia, app de monitoreo y garant\xEDas Tier 1. Solicita "media_to_send": "INSTALACION_PROFESIONAL".
-   - Al hablar de costos, presenta proactivamente las opciones de pago (contado vs. financiamiento con enganche desde 10%) y solicita "media_to_send": "FINANCIAMIENTO".
+5. PROPUESTA PROACTIVA DE VISITA T\xC9CNICA GRATUITA EN SITIO:
+   - Si el usuario no tiene la foto del recibo a la mano ("No la tengo a la mano") o al avanzar en la calificaci\xF3n del techo/sombras (Pasos 3 y 4), ofrece proactivamente una Visita T\xE9cnica Gratuita en Sitio por nuestros ingenieros certificados para evaluar la estructura, sombras y trayectoria el\xE9ctrica. Establece "propose_technical_visit": true. El bot PERMANECE ACTIVO (botDisabled = false).
 
-4. RESPUESTAS LIMPIAS Y NO REPETITIVAS:
-   - Responde de forma directa a las preguntas espec\xEDficas del usuario (ej: sobre instaladores, garant\xEDas, financiamiento) sin volver a repetir la tarjeta larga de cotizaci\xF3n en cada turno.
+6. CANALIZACI\xD3N CON ASESOR COMERCIAL ESPECIALIZADO:
+   - Si el usuario solicita hablar con una persona, requiere asesor\xEDa personalizada avanzada o pide la llamada de un especialista, establece "trigger_human_handoff": true, "propose_advisor_handoff": true y "handoff_reason": "Solicitud de atenci\xF3n humana".
+
+7. RESPUESTAS LIMPIAS Y NO REPETITIVAS:
+   - Responde de forma directa a las preguntas espec\xEDficas del usuario sin volver a repetir la tarjeta larga de cotizaci\xF3n en cada turno.
 
 ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
 {
@@ -587,6 +600,7 @@ ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
   "extracted_data": {
     "client_name": string | null,
     "bill_amount": number | null,
+    "bill_frequency": "bimestral" | "mensual" | null,
     "roof_type": string | null,
     "meter_distance": string | null,
     "extra_loads": string | null,
@@ -595,6 +609,8 @@ ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
   },
   "quote_consent_requested": boolean,
   "quote_consent_given": boolean,
+  "propose_technical_visit": boolean,
+  "propose_advisor_handoff": boolean,
   "trigger_human_handoff": boolean,
   "handoff_reason": string | null,
   "media_to_send": "FINANCIAMIENTO" | "INSTALACION_PROFESIONAL" | "COTIZACION_PDF" | null
@@ -614,6 +630,7 @@ ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
     <bot_disabled>${ctx.botDisabled}</bot_disabled>
     <data_collected>${JSON.stringify(ctx.extractedData)}</data_collected>
   </current_state>
+  <calculated_quote>${calculatedQuoteStr}</calculated_quote>
   <history_summary>${cleanHistory}</history_summary>
   <user_message>${cleanMessage}</user_message>
 </context>`;
@@ -637,6 +654,8 @@ ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
         extracted_data: parsed.extracted_data || {},
         quote_consent_requested: Boolean(parsed.quote_consent_requested),
         quote_consent_given: Boolean(parsed.quote_consent_given),
+        propose_technical_visit: Boolean(parsed.propose_technical_visit),
+        propose_advisor_handoff: Boolean(parsed.propose_advisor_handoff),
         trigger_human_handoff: Boolean(parsed.trigger_human_handoff),
         handoff_reason: parsed.handoff_reason || void 0,
         media_to_send: parsed.media_to_send || null
@@ -862,6 +881,79 @@ _Este presupuesto es una estimaci\xF3n aproximada basada en tu consumo reportado
   }
 };
 
+// server/domain/services/BillNormalizerService.ts
+var BillNormalizerService = class {
+  /**
+   * Normalizes bill amount and frequency.
+   * If frequency is omitted, defaults to 'bimestral' (standard CFE residential billing in Mexico).
+   */
+  static normalize(input) {
+    let amount = input.rawAmount;
+    let frequency = this.parseFrequency(input.rawFrequency);
+    if ((!amount || amount <= 0) && input.messageText) {
+      const preParsed = this.preParseUserText(input.messageText);
+      if (preParsed) {
+        amount = preParsed.amount;
+        if (!frequency && preParsed.frequency) {
+          frequency = preParsed.frequency;
+        }
+      }
+    }
+    if (!amount || amount <= 0) {
+      return null;
+    }
+    let isDefaultAssumed = false;
+    if (!frequency) {
+      frequency = "bimestral";
+      isDefaultAssumed = true;
+    }
+    let monthlyBill;
+    let bimestralBill;
+    if (frequency === "bimestral") {
+      bimestralBill = amount;
+      monthlyBill = Math.round(amount / 2);
+    } else {
+      monthlyBill = amount;
+      bimestralBill = Math.round(amount * 2);
+    }
+    const formattedSummary = frequency === "bimestral" ? `$${bimestralBill.toLocaleString("es-MX")} MXN bimestrales ($${monthlyBill.toLocaleString("es-MX")} MXN/mes)` : `$${monthlyBill.toLocaleString("es-MX")} MXN mensuales ($${bimestralBill.toLocaleString("es-MX")} MXN/bimestre)`;
+    return {
+      monthlyBill,
+      bimestralBill,
+      frequency,
+      isDefaultFrequencyAssumed: isDefaultAssumed,
+      formattedSummary
+    };
+  }
+  /**
+   * Pre-parses raw message text to extract numeric amounts and frequency keywords
+   * before LLM invocation for single-pass prompt seeding.
+   */
+  static preParseUserText(text) {
+    if (!text) return null;
+    const lower = text.toLowerCase().trim();
+    const cleanedText = lower.replace(/,/g, "");
+    const amountMatch = cleanedText.match(/(?:pago|monto|recibo|es de|son|\$)?\s*(\d{3,6})\s*(?:pesos|mxn)?/);
+    if (!amountMatch) return null;
+    const amount = parseInt(amountMatch[1], 10);
+    if (isNaN(amount) || amount <= 0) return null;
+    let frequency;
+    if (lower.includes("bimestre") || lower.includes("bimestral") || lower.includes("cada dos meses") || lower.includes("cada 2 meses") || lower.includes("bimensual")) {
+      frequency = "bimestral";
+    } else if (lower.includes("mes") || lower.includes("mensual") || lower.includes("al mes") || lower.includes("cada mes")) {
+      frequency = "mensual";
+    }
+    return { amount, frequency };
+  }
+  static parseFrequency(rawFreq) {
+    if (!rawFreq) return void 0;
+    const lower = rawFreq.toLowerCase();
+    if (lower.includes("bimest")) return "bimestral";
+    if (lower.includes("mens")) return "mensual";
+    return void 0;
+  }
+};
+
 // server/application/orchestration/SofiaFlowOrchestrator.ts
 var SofiaFlowOrchestrator = class {
   constructor(conversationRepo, leadRepo, quoteEngine2, llmProvider2, sendWhatsAppText, emailService2) {
@@ -885,18 +977,44 @@ var SofiaFlowOrchestrator = class {
       return { replyText: "", nextStep: 6, botDisabled: true };
     }
     const currentStepInt = this.phaseToStepInt(conv.state.phase);
+    const preParsedBill = BillNormalizerService.normalize({
+      rawAmount: conv.state.monthlyBill ? conv.state.billFrequency === "bimestral" ? conv.state.bimestralBill || conv.state.monthlyBill * 2 : conv.state.monthlyBill : null,
+      rawFrequency: conv.state.billFrequency,
+      messageText
+    });
+    if (preParsedBill) {
+      conv.state.monthlyBill = preParsedBill.monthlyBill;
+      conv.state.bimestralBill = preParsedBill.bimestralBill;
+      conv.state.billFrequency = preParsedBill.frequency;
+      conv.montoRecibo = preParsedBill.formattedSummary;
+    }
+    let calculatedQuoteInfo = null;
+    let preCalcResult = null;
+    if (conv.state.monthlyBill) {
+      preCalcResult = this.quoteEngine.calculate(conv.state.monthlyBill, conv.state.extraLoads);
+      calculatedQuoteInfo = {
+        panels: preCalcResult.panels,
+        systemPowerKw: preCalcResult.systemPowerKw,
+        estimatedCost: preCalcResult.estimatedCost,
+        monthlySavings: preCalcResult.monthlySavings,
+        annualSavings: preCalcResult.annualSavings,
+        rangeLabel: preCalcResult.systemDescription
+      };
+    }
     const promptCtx = {
       phone,
       userName: conv.nombre,
       currentStep: currentStepInt,
       extractedData: {
         billAmount: conv.state.monthlyBill,
+        billFrequency: conv.state.billFrequency,
         roofType: conv.state.roofType,
         meterDistance: conv.state.meterDistance,
         extraLoads: conv.state.extraLoads,
         location: conv.state.location,
         ownership: conv.state.isOwner ? "Propio" : void 0
       },
+      calculatedQuote: calculatedQuoteInfo,
       quoteConsentRequested: conv.state.quoteConsentRequested,
       quoteConsentGiven: conv.state.quoteConsentGiven,
       botDisabled: conv.botDisabled,
@@ -920,8 +1038,21 @@ var SofiaFlowOrchestrator = class {
         conv.nombre = parsed.extracted_data.client_name;
       }
       if (parsed.extracted_data.bill_amount) {
-        conv.state.monthlyBill = parsed.extracted_data.bill_amount;
-        conv.montoRecibo = `$${parsed.extracted_data.bill_amount} MXN`;
+        const normalized = BillNormalizerService.normalize({
+          rawAmount: parsed.extracted_data.bill_amount,
+          rawFrequency: parsed.extracted_data.bill_frequency,
+          messageText
+        });
+        if (normalized) {
+          const billChanged = conv.state.monthlyBill !== normalized.monthlyBill;
+          conv.state.monthlyBill = normalized.monthlyBill;
+          conv.state.bimestralBill = normalized.bimestralBill;
+          conv.state.billFrequency = normalized.frequency;
+          conv.montoRecibo = normalized.formattedSummary;
+          if (billChanged && conv.state.completedSteps.includes("QUOTE_SENT")) {
+            conv.state.completedSteps = conv.state.completedSteps.filter((step) => step !== "QUOTE_SENT");
+          }
+        }
       }
       if (parsed.extracted_data.roof_type) {
         conv.state.roofType = parsed.extracted_data.roof_type;
@@ -944,10 +1075,13 @@ var SofiaFlowOrchestrator = class {
     if (parsed.quote_consent_given || conv.state.quoteConsentRequested && explicitAffirmative) {
       conv.state.quoteConsentGiven = true;
     }
+    if (parsed.propose_technical_visit) {
+      conv.state.technicalVisitProposed = true;
+    }
     const isQuoteNotYetSent = !conv.state.completedSteps.includes("QUOTE_SENT");
     if (conv.state.quoteConsentGiven && isQuoteNotYetSent && conv.state.monthlyBill) {
       const bill = conv.state.monthlyBill;
-      const calcResult = this.quoteEngine.calculate(bill);
+      const calcResult = this.quoteEngine.calculate(bill, conv.state.extraLoads);
       const quoteDto = {
         clientName: conv.nombre || userName || "Cliente",
         clientPhone: phone,
@@ -978,13 +1112,14 @@ ${parsed.message_to_user}`;
       mediaSent.push(imgUrl);
       conv.state.mediaSentFlags.financiamiento = true;
     }
-    let isHandoff = parsed.trigger_human_handoff;
+    let isHandoff = parsed.trigger_human_handoff || parsed.propose_advisor_handoff;
     if (messageText.toLowerCase().includes("asesor") || messageText.toLowerCase().includes("humano") || messageText.toLowerCase().includes("agente")) {
       isHandoff = true;
     }
     if (isHandoff) {
       conv.botDisabled = true;
       conv.state.phase = "HUMAN_HANDOFF";
+      conv.state.advisorHandoffProposed = true;
       finalReply = `\xA1Con mucho gusto! En un momento uno de nuestros asesores especializados de O3 Energy se pondr\xE1 en contacto contigo directamente a trav\xE9s de este chat para brindarte atenci\xF3n personalizada. \u2600\uFE0F
 
 \xA1Que tengas un excelente d\xEDa!`;

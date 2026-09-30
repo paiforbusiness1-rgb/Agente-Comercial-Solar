@@ -20,6 +20,10 @@ export interface ConversationState {
   intent?: string;
   clientName?: string;
   monthlyBill?: number;
+  bimestralBill?: number;
+  billFrequency?: 'bimestral' | 'mensual';
+  technicalVisitProposed?: boolean;
+  advisorHandoffProposed?: boolean;
   isOwner?: boolean;
   roofType?: string;
   hasShade?: boolean;
