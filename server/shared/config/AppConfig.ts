@@ -28,5 +28,11 @@ export const AppConfig = {
       pass: process.env.SENDER_PASSWORD || '',
       salesEmail: process.env.SALES_EMAIL || 'ventas@o3energy.mx',
     };
+  },
+  get mediaBaseUrl() {
+    return process.env.MEDIA_BASE_URL || 'https://agente-comercial-solar.vercel.app/images';
+  },
+  get appUrl() {
+    return process.env.APP_URL || 'https://agente-comercial-solar.vercel.app';
   }
 };

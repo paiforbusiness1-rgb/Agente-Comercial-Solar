@@ -7,6 +7,7 @@ import { LLMOrchestrator } from './server/application/orchestrators/LLMOrchestra
 import { SOFIA_DEFINITION } from './server/agents/definitions/Sofia.js';
 import { InMemoryConversationRepository, InMemoryLeadRepository } from './server/infrastructure/persistence/Repositories.js';
 import { ReceiveMessageUseCase } from './server/application/usecases/ReceiveMessageUseCase.js';
+import { SofiaFlowOrchestrator } from './server/application/orchestration/SofiaFlowOrchestrator.js';
 
 interface TestStepResult {
   step: string;
@@ -92,16 +93,15 @@ async function runE2EPipelineTest() {
     const llmProvider = new GroqProvider();
     const convRepo = new InMemoryConversationRepository();
     const leadRepo = new InMemoryLeadRepository();
-    const orchestrator = new LLMOrchestrator(llmProvider, quoteEngine, leadRepo, convRepo);
-
-    let sentViaWhatsApp = false;
     const mockSender = async (phone: string, text: string) => {
-      sentViaWhatsApp = true;
       console.log(`[Mock Sender] Despacho preparado para +${phone}: "${text.substring(0, 70)}..."`);
       return true;
     };
+    const emailService = { async sendLeadNotification() { return true; } };
+    const orchestrator = new SofiaFlowOrchestrator(convRepo, leadRepo, quoteEngine, llmProvider, mockSender, emailService);
+    const mockMediaSender = async (phone: string, url: string) => true;
 
-    const useCase = new ReceiveMessageUseCase(convRepo, orchestrator, SOFIA_DEFINITION, mockSender);
+    const useCase = new ReceiveMessageUseCase(convRepo, orchestrator, mockSender, mockMediaSender);
     const execution = await useCase.execute({
       phone: testPhone,
       text: testMessage,

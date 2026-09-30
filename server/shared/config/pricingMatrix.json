@@ -1,0 +1,65 @@
+{
+  "currency": "MXN",
+  "taxIncluded": true,
+  "defaultRoiYears": 3.0,
+  "roundingRule": "NEXT_EVEN",
+  "disclaimer": "Nota: Este presupuesto es una estimación preliminar basada en tu consumo reportado. El costo y dimensionamiento final serán confirmados por nuestros Ingenieros Técnicos durante la visita gratuita a tu domicilio (evaluación de inclinación de techo, sombras y trayectoria eléctrica).",
+  "panelPowerW": 550,
+  "tiers": [
+    {
+      "minBimestralBill": 0,
+      "maxBimestralBill": 4000,
+      "minMonthlyBill": 0,
+      "maxMonthlyBill": 2000,
+      "panels": 4,
+      "systemKwp": 2.2,
+      "priceMxn": 26000,
+      "roiYears": 2.5,
+      "rangeLabel": "4 paneles solares (2.2 kWp)"
+    },
+    {
+      "minBimestralBill": 4000,
+      "maxBimestralBill": 6000,
+      "minMonthlyBill": 2000,
+      "maxMonthlyBill": 3000,
+      "panels": 6,
+      "systemKwp": 3.3,
+      "priceMxn": 38900,
+      "roiYears": 2.8,
+      "rangeLabel": "6 paneles solares (3.3 kWp)"
+    },
+    {
+      "minBimestralBill": 6000,
+      "maxBimestralBill": 8000,
+      "minMonthlyBill": 3000,
+      "maxMonthlyBill": 4000,
+      "panels": 8,
+      "systemKwp": 4.4,
+      "priceMxn": 51900,
+      "roiYears": 3.0,
+      "rangeLabel": "8 paneles solares (4.4 kWp)"
+    },
+    {
+      "minBimestralBill": 8000,
+      "maxBimestralBill": 10000,
+      "minMonthlyBill": 4000,
+      "maxMonthlyBill": 5000,
+      "panels": 10,
+      "systemKwp": 5.5,
+      "priceMxn": 64800,
+      "roiYears": 3.2,
+      "rangeLabel": "10 paneles solares (5.5 kWp)"
+    },
+    {
+      "minBimestralBill": 10000,
+      "maxBimestralBill": 999999,
+      "minMonthlyBill": 5000,
+      "maxMonthlyBill": 999999,
+      "panels": 12,
+      "systemKwp": 6.6,
+      "priceMxn": 77700,
+      "roiYears": 3.5,
+      "rangeLabel": "12+ paneles solares (Sistema Traje a Medida)"
+    }
+  ]
+}

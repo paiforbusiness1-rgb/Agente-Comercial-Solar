@@ -1,6 +1,6 @@
 // api_src/index.ts
 import express from "express";
-import { initializeApp, getApps as getApps2, cert } from "firebase-admin/app";
+import { initializeApp, getApps as getApps3, cert } from "firebase-admin/app";
 import { getFirestore as getFirestore2 } from "firebase-admin/firestore";
 import nodemailer2 from "nodemailer";
 
@@ -42,6 +42,12 @@ var AppConfig = {
       pass: process.env.SENDER_PASSWORD || "",
       salesEmail: process.env.SALES_EMAIL || "ventas@o3energy.mx"
     };
+  },
+  get mediaBaseUrl() {
+    return process.env.MEDIA_BASE_URL || "https://agente-comercial-solar.vercel.app/images";
+  },
+  get appUrl() {
+    return process.env.APP_URL || "https://agente-comercial-solar.vercel.app";
   }
 };
 
@@ -150,71 +156,105 @@ var GroqProvider = class {
   }
 };
 
+// server/shared/config/pricingMatrix.json
+var pricingMatrix_default = {
+  currency: "MXN",
+  taxIncluded: true,
+  defaultRoiYears: 3,
+  roundingRule: "NEXT_EVEN",
+  disclaimer: "Nota: Este presupuesto es una estimaci\xF3n preliminar basada en tu consumo reportado. El costo y dimensionamiento final ser\xE1n confirmados por nuestros Ingenieros T\xE9cnicos durante la visita gratuita a tu domicilio (evaluaci\xF3n de inclinaci\xF3n de techo, sombras y trayectoria el\xE9ctrica).",
+  panelPowerW: 550,
+  tiers: [
+    {
+      minBimestralBill: 0,
+      maxBimestralBill: 4e3,
+      minMonthlyBill: 0,
+      maxMonthlyBill: 2e3,
+      panels: 4,
+      systemKwp: 2.2,
+      priceMxn: 26e3,
+      roiYears: 2.5,
+      rangeLabel: "4 paneles solares (2.2 kWp)"
+    },
+    {
+      minBimestralBill: 4e3,
+      maxBimestralBill: 6e3,
+      minMonthlyBill: 2e3,
+      maxMonthlyBill: 3e3,
+      panels: 6,
+      systemKwp: 3.3,
+      priceMxn: 38900,
+      roiYears: 2.8,
+      rangeLabel: "6 paneles solares (3.3 kWp)"
+    },
+    {
+      minBimestralBill: 6e3,
+      maxBimestralBill: 8e3,
+      minMonthlyBill: 3e3,
+      maxMonthlyBill: 4e3,
+      panels: 8,
+      systemKwp: 4.4,
+      priceMxn: 51900,
+      roiYears: 3,
+      rangeLabel: "8 paneles solares (4.4 kWp)"
+    },
+    {
+      minBimestralBill: 8e3,
+      maxBimestralBill: 1e4,
+      minMonthlyBill: 4e3,
+      maxMonthlyBill: 5e3,
+      panels: 10,
+      systemKwp: 5.5,
+      priceMxn: 64800,
+      roiYears: 3.2,
+      rangeLabel: "10 paneles solares (5.5 kWp)"
+    },
+    {
+      minBimestralBill: 1e4,
+      maxBimestralBill: 999999,
+      minMonthlyBill: 5e3,
+      maxMonthlyBill: 999999,
+      panels: 12,
+      systemKwp: 6.6,
+      priceMxn: 77700,
+      roiYears: 3.5,
+      rangeLabel: "12+ paneles solares (Sistema Traje a Medida)"
+    }
+  ]
+};
+
 // server/infrastructure/engines/SolarQuoteEngine.ts
-var PRICE_TABLE = [
-  {
-    minMonthly: 1250,
-    maxMonthly: 2e3,
-    panelsMid: 5,
-    systemKwp: 2,
-    costMid: 8e4,
-    roiYears: 3,
-    rangeLabel: "4 a 6 paneles"
-  },
-  {
-    minMonthly: 2e3,
-    maxMonthly: 3e3,
-    panelsMid: 7,
-    systemKwp: 2.8,
-    costMid: 105e3,
-    roiYears: 3.5,
-    rangeLabel: "6 a 8 paneles"
-  },
-  {
-    minMonthly: 3e3,
-    maxMonthly: 5e3,
-    panelsMid: 10,
-    systemKwp: 4,
-    costMid: 15e4,
-    roiYears: 3.7,
-    rangeLabel: "8 a 12 paneles"
-  },
-  {
-    minMonthly: 5e3,
-    maxMonthly: Infinity,
-    panelsMid: 14,
-    systemKwp: 5.6,
-    costMid: 22e4,
-    roiYears: 4,
-    rangeLabel: "12+ paneles (sistema comercial)"
-  }
-];
+var matrix = pricingMatrix_default;
 var EXTRA_LOAD_FACTOR = 1.25;
 var SolarQuoteEngine = class {
   calculate(monthlyBillMxn, extraLoad = false) {
-    const effectiveBill = extraLoad ? monthlyBillMxn * EXTRA_LOAD_FACTOR : monthlyBillMxn;
-    const tier = PRICE_TABLE.find(
-      (t) => effectiveBill >= t.minMonthly && effectiveBill < t.maxMonthly
-    ) ?? PRICE_TABLE[PRICE_TABLE.length - 1];
-    const panels = tier.panelsMid;
-    const systemKwp = tier.systemKwp;
-    const estimatedCost = tier.costMid;
-    const roiYears = tier.roiYears;
+    const effectiveMonthlyBill = extraLoad ? monthlyBillMxn * EXTRA_LOAD_FACTOR : monthlyBillMxn;
+    const bimestralBillEquivalent = effectiveMonthlyBill * 2;
+    const tier = matrix.tiers.find(
+      (t) => bimestralBillEquivalent >= t.minBimestralBill && bimestralBillEquivalent < t.maxBimestralBill
+    ) ?? matrix.tiers[matrix.tiers.length - 1];
+    let panels = tier.panels;
+    if (matrix.roundingRule === "NEXT_EVEN" && panels % 2 !== 0) {
+      panels += 1;
+    }
+    const systemPowerKw = tier.systemKwp;
+    const estimatedCost = tier.priceMxn;
+    const roiYears = tier.roiYears || matrix.defaultRoiYears;
     const annualSavings = Math.round(monthlyBillMxn * 0.9 * 12);
     const monthlySavings = Math.round(annualSavings / 12);
     return {
       monthlyBill: monthlyBillMxn,
       panels,
-      systemPowerKw: systemKwp,
+      systemPowerKw,
       estimatedCost,
       roiYears,
       monthlySavings,
       annualSavings,
       monthlySavingsFormatted: `$${monthlySavings.toLocaleString("es-MX")} MXN`,
       annualSavingsFormatted: `$${annualSavings.toLocaleString("es-MX")} MXN`,
-      costFormatted: `$${estimatedCost.toLocaleString("es-MX")} MXN`,
-      systemDescription: `${panels} paneles solares (sistema de ${systemKwp.toFixed(1)} kWp)`,
-      disclaimer: "Este es un presupuesto preliminar. El costo final depende de la visita t\xE9cnica sin costo en tu sitio (evaluaci\xF3n de inclinaci\xF3n del techo, sombras y trayectoria el\xE9ctrica)."
+      costFormatted: `$${estimatedCost.toLocaleString("es-MX")} MXN (IVA incluido)`,
+      systemDescription: `${panels} paneles solares de alta eficiencia (${systemPowerKw.toFixed(1)} kWp)`,
+      disclaimer: matrix.disclaimer
     };
   }
 };
@@ -357,313 +397,567 @@ var FirestoreLeadRepository = class {
   }
 };
 
-// server/domain/value_objects/index.ts
-var Money = class {
-  constructor(amount, currency = "MXN") {
-    if (amount < 0) throw new Error("Money amount cannot be negative");
-    this._amount = amount;
-    this._currency = currency;
-  }
-  get amount() {
-    return this._amount;
-  }
-  get currency() {
-    return this._currency;
-  }
-  format() {
-    return `$${this._amount.toLocaleString("es-MX")} ${this._currency}`;
-  }
-  equals(other) {
-    return this._amount === other._amount && this._currency === other._currency;
-  }
-};
-var LeadScore = class {
-  constructor(value) {
-    if (value < 0 || value > 100) throw new Error("LeadScore must be between 0 and 100");
-    this._value = Math.round(value);
-  }
-  get value() {
-    return this._value;
-  }
-  get label() {
-    if (this._value < 40) return "cold";
-    if (this._value < 70) return "warm";
-    return "hot";
-  }
-  isHot() {
-    return this._value >= 70;
-  }
-};
-
-// server/application/orchestrators/LLMOrchestrator.ts
-import nodemailer from "nodemailer";
-var MAX_TOOL_ROUNDS = 5;
-var LLMOrchestrator = class {
-  constructor(llm, quoteEngine2, leadRepo, convRepo) {
-    this.llm = llm;
-    this.quoteEngine = quoteEngine2;
-    this.leadRepo = leadRepo;
-    this.convRepo = convRepo;
-  }
-  async run(agent, conversation, userText) {
-    const userMsg = { sender: "user", text: userText, timestamp: (/* @__PURE__ */ new Date()).toISOString() };
-    conversation.messages.push(userMsg);
-    const history = conversation.messages.slice(-20).map((m) => ({
-      role: m.sender === "user" ? "user" : "assistant",
-      content: m.text
-    }));
-    const messages = [
-      { role: "system", content: agent.systemPrompt },
-      ...history
-    ];
-    let leadGenerated = false;
-    let finalText = "";
-    for (let round = 0; round < MAX_TOOL_ROUNDS; round++) {
-      const response = await this.llm.complete(messages, this._buildTools(), AppConfig.groq.temperature);
-      if (response.finishReason === "stop") {
-        finalText = response.text || "";
-        break;
-      }
-      if (response.finishReason === "tool_calls") {
-        messages.push({
-          role: "assistant",
-          content: JSON.stringify({ tool_calls: response.toolCalls })
-        });
-        for (const toolCall of response.toolCalls) {
-          logger.info(`[LLMOrchestrator] Tool called: ${toolCall.name}`, toolCall.arguments);
-          const toolResult = await this._executeTool(toolCall.name, toolCall.arguments, conversation);
-          if (toolCall.name === "registrar_prospecto_calificado") {
-            leadGenerated = true;
-            await this._saveLeadAndNotify(toolCall.arguments, conversation);
-          }
-          messages.push({
-            role: "tool",
-            name: toolCall.name,
-            tool_call_id: toolCall.id,
-            content: JSON.stringify(toolResult)
-          });
-        }
-        continue;
-      }
-    }
-    if (!finalText) {
-      finalText = "Tuve un problema t\xE9cnico. Un asesor de O3 Energy te contactar\xE1 pronto. \u{1F64F}";
-    }
-    conversation.messages.push({ sender: "bot", text: finalText, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
-    conversation.lastMessageAt = (/* @__PURE__ */ new Date()).toISOString();
-    if (leadGenerated) conversation.state.phase = "LEAD_GENERATED";
-    return { replyText: finalText, updatedConversation: conversation, leadGenerated };
-  }
-  // ─── Tool Definitions exposed to Groq ─────────────────────────────────────
-  _buildTools() {
-    return [
-      {
-        name: "calcular_cotizacion_solar",
-        description: "Calcula la cotizaci\xF3n preliminar de un sistema solar. SIEMPRE usa esta herramienta para dar precios, nunca calcules t\xFA mismo.",
-        parameters: {
-          type: "object",
-          properties: {
-            gasto_mensual_mxn: { type: "number", description: "Gasto mensual de electricidad en pesos MXN." },
-            carga_extra: { type: "string", description: "Si planea agregar cargas futuras.", enum: ["si", "no"] }
-          },
-          required: ["gasto_mensual_mxn"]
-        }
-      },
-      {
-        name: "registrar_prospecto_calificado",
-        description: "Guarda al prospecto en el CRM. \xDAsala SOLO cuando el cliente ya recibi\xF3 la cotizaci\xF3n y quiere continuar.",
-        parameters: {
-          type: "object",
-          properties: {
-            nombre: { type: "string", description: "Nombre del prospecto." },
-            gasto_mensual_mxn: { type: "number", description: "Gasto mensual en MXN." },
-            notas_tecnicas: { type: "string", description: "Resumen del techo, plantas, sombras, voltaje." },
-            lead_score: { type: "number", description: "Puntuaci\xF3n 0-100." }
-          },
-          required: ["nombre", "gasto_mensual_mxn", "notas_tecnicas", "lead_score"]
-        }
-      }
-    ];
-  }
-  // ─── Tool Executor ─────────────────────────────────────────────────────────
-  async _executeTool(name, args, conv) {
-    if (name === "calcular_cotizacion_solar") {
-      const monthly = args.gasto_mensual_mxn;
-      const extraLoad = args.carga_extra === "si";
-      const quote = this.quoteEngine.calculate(monthly, extraLoad);
-      conv.state.monthlyBill = monthly;
-      conv.state.phase = "QUOTATION";
-      conv.montoRecibo = new Money(monthly).format();
-      conv.sistemaEstimado = quote.systemDescription;
-      conv.costoEstimado = quote.costFormatted;
-      return quote;
-    }
-    if (name === "registrar_prospecto_calificado") {
-      const score = new LeadScore(args.lead_score);
-      conv.state.leadScore = score.value;
-      conv.state.phase = "LEAD_GENERATED";
-      return { status: "ok", message: "Prospecto registrado exitosamente." };
-    }
-    return { error: `Unknown tool: ${name}` };
-  }
-  // ─── Lead Persistence + Email ─────────────────────────────────────────────
-  async _saveLeadAndNotify(args, conv) {
-    const monthly = args.gasto_mensual_mxn;
-    const quote = this.quoteEngine.calculate(monthly, false);
-    const score = new LeadScore(args.lead_score ?? 50);
-    const lead = {
-      id: `lead_${conv.tenantId}_${conv.phone}`,
-      tenantId: conv.tenantId,
-      phone: conv.phone,
-      nombre: args.nombre || conv.nombre,
-      montoRecibo: new Money(monthly).format(),
-      sistemaEstimado: quote.systemDescription,
-      costoEstimado: quote.costFormatted,
-      roiAnios: `${quote.roiYears} a\xF1os`,
-      leadScore: score.value,
-      notasTecnicas: args.notas_tecnicas,
-      status: "pending_review",
-      createdAt: (/* @__PURE__ */ new Date()).toISOString()
-    };
-    await this.leadRepo.save(lead);
-    logger.info("[LLMOrchestrator] Lead saved", { leadId: lead.id, score: score.value, label: score.label });
-    await this._sendEmailAlert(lead);
-  }
-  async _sendEmailAlert(lead) {
-    const cfg = AppConfig.smtp;
-    if (!cfg.pass) {
-      logger.info("[LLMOrchestrator] SMTP not configured \u2014 skipping email alert", { leadId: lead.id });
-      return;
-    }
-    try {
-      const t = nodemailer.createTransport({
-        host: cfg.server,
-        port: cfg.port,
-        secure: cfg.port === 465,
-        auth: { user: cfg.user, pass: cfg.pass }
-      });
-      await t.sendMail({
-        from: `"Alertas O3 Energy AI" <${cfg.user}>`,
-        to: cfg.salesEmail,
-        subject: `\u{1F525} Lead #${lead.leadScore}/100 \u2014 ${lead.nombre} | ${lead.montoRecibo}/mes`,
-        html: `
-          <div style="font-family:sans-serif;max-width:600px;margin:auto;border:1px solid #e2e8f0;border-radius:16px;overflow:hidden">
-            <div style="background:#ea580c;color:white;padding:24px;text-align:center">
-              <h1 style="margin:0">\u{1F525} \xA1Nuevo Lead Calificado!</h1>
-              <p style="margin:4px 0 0;opacity:.9">Score: ${lead.leadScore}/100 \u2014 ${lead.leadScore >= 70 ? "CALIENTE \u{1F525}" : "TIBIO \u26A0\uFE0F"}</p>
-            </div>
-            <div style="padding:24px;color:#334155">
-              <table style="width:100%;border-collapse:collapse">
-                <tr><td style="padding:8px 0;font-weight:bold;color:#64748b">Nombre:</td><td>${lead.nombre}</td></tr>
-                <tr><td style="padding:8px 0;font-weight:bold;color:#64748b">WhatsApp:</td><td>+${lead.phone}</td></tr>
-                <tr><td style="padding:8px 0;font-weight:bold;color:#64748b">Gasto CFE:</td><td style="color:#ea580c;font-weight:bold">${lead.montoRecibo}/mes</td></tr>
-                <tr><td style="padding:8px 0;font-weight:bold;color:#64748b">Sistema:</td><td>${lead.sistemaEstimado}</td></tr>
-                <tr><td style="padding:8px 0;font-weight:bold;color:#64748b">Costo est.:</td><td style="color:#ea580c;font-weight:bold">${lead.costoEstimado}</td></tr>
-                <tr><td style="padding:8px 0;font-weight:bold;color:#64748b">ROI:</td><td>${lead.roiAnios}</td></tr>
-                <tr><td style="padding:8px 0;font-weight:bold;color:#64748b">Notas t\xE9cnicas:</td><td>${lead.notasTecnicas}</td></tr>
-              </table>
-              <div style="text-align:center;margin-top:24px">
-                <a href="https://wa.me/${lead.phone}" style="background:#ea580c;color:white;padding:12px 24px;border-radius:12px;text-decoration:none;font-weight:bold">\u{1F4AC} Atender en WhatsApp</a>
-              </div>
-            </div>
-          </div>`
-      });
-      logger.info("[LLMOrchestrator] Email alert sent", { to: cfg.salesEmail });
-    } catch (err) {
-      logger.error("[LLMOrchestrator] Email send failed", { error: err.message });
-    }
-  }
-};
-
 // server/application/usecases/ReceiveMessageUseCase.ts
 var ReceiveMessageUseCase = class {
-  constructor(convRepo, orchestrator, agent, sendWhatsApp) {
+  constructor(convRepo, orchestrator, sendWhatsApp, sendWhatsAppMedia2) {
     this.convRepo = convRepo;
     this.orchestrator = orchestrator;
-    this.agent = agent;
     this.sendWhatsApp = sendWhatsApp;
+    this.sendWhatsAppMedia = sendWhatsAppMedia2;
   }
   async execute(input) {
     const tenantId = input.tenantId || AppConfig.tenant.defaultId;
     const phone = input.phone.replace(/[^\d]/g, "");
-    logger.info("[ReceiveMessageUseCase] Message received", { phone, tenantId, text: input.text.substring(0, 60) });
-    let conversation = await this.convRepo.findByPhone(tenantId, phone);
-    if (input.name && conversation.nombre === "Cliente") {
-      conversation.nombre = input.name;
+    logger.info("[ReceiveMessageUseCase] Message received", {
+      phone,
+      tenantId,
+      text: input.text.substring(0, 60)
+    });
+    const result = await this.orchestrator.processMessage({
+      tenantId,
+      phone,
+      userName: input.name,
+      messageText: input.text
+    });
+    if (result.replyText) {
+      await this.sendWhatsApp(phone, result.replyText);
     }
-    if (conversation.botDisabled) {
-      conversation.messages.push({ sender: "user", text: input.text, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
-      conversation.lastMessageAt = (/* @__PURE__ */ new Date()).toISOString();
-      await this.convRepo.save(conversation);
-      logger.info("[ReceiveMessageUseCase] Bot disabled \u2014 message stored for human agent", { phone });
-      return { reply: "", leadGenerated: false };
+    if (result.mediaSent && result.mediaSent.length > 0) {
+      for (const mediaUrl of result.mediaSent) {
+        await this.sendWhatsAppMedia(phone, mediaUrl);
+      }
     }
-    const { replyText, updatedConversation, leadGenerated } = await this.orchestrator.run(
-      this.agent,
-      conversation,
-      input.text
-    );
-    await this.convRepo.save(updatedConversation);
-    if (replyText) {
-      await this.sendWhatsApp(phone, replyText);
-    }
-    logger.info("[ReceiveMessageUseCase] Done", { phone, leadGenerated, replyLength: replyText.length });
-    return { reply: replyText, leadGenerated };
+    logger.info("[ReceiveMessageUseCase] Execution finished", {
+      phone,
+      nextStep: result.nextStep,
+      botDisabled: result.botDisabled
+    });
+    return { reply: result.replyText, leadGenerated: result.botDisabled };
   }
 };
 
-// server/agents/definitions/Sofia.ts
-import { readFileSync } from "fs";
-import { join } from "path";
-function loadKnowledge(filename) {
-  try {
-    return readFileSync(join(__dirname, `../../knowledge/sofia/${filename}`), "utf-8");
-  } catch {
-    return "";
+// server/application/builders/SofiaPromptBuilder.ts
+var SofiaPromptBuilder = class {
+  /**
+   * Sanitizes user input string to prevent XML tag injection attacks (SSD).
+   */
+  static sanitizeInput(input) {
+    if (!input) return "";
+    return input.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
   }
-}
-var faq = loadKnowledge("faq.md");
-var SOFIA_SYSTEM_PROMPT = `
-Eres Sof\xEDa, asesora de ventas experta de "O3 Energy M\xE9xico", empresa l\xEDder en instalaci\xF3n de sistemas fotovoltaicos. Hablas con calidez, en espa\xF1ol de M\xE9xico, de forma profesional y breve (ideal para WhatsApp).
+  /**
+   * Builds system prompt and XML-delimited user context for Sofía IA.
+   */
+  static buildPrompt(ctx) {
+    const systemPrompt = `Eres Sof\xEDa, Asesora Comercial de O3 Energy M\xE9xico.
+Tu personalidad es c\xE1lida, profesional, emp\xE1tica y de alta conversi\xF3n comercial.
+Tu objetivo es guiar al cliente en un flujo comercial de 6 pasos de forma fluida y natural en WhatsApp.
 
-Tu objetivo es guiar al prospecto a trav\xE9s de una conversaci\xF3n natural para:
-1. Presentarte y obtener su nombre.
-2. Confirmar si es propietario del inmueble (requerido para el tr\xE1mite CFE).
-3. Descubrir su gasto de luz en pesos MXN y CONFIRMAR EXPL\xCDCITAMENTE si ese gasto es MENSUAL o BIMESTRAL.
-4. Realizar una encuesta t\xE9cnica b\xE1sica: tipo de techo, n\xFAmero de plantas, presencia de sombras/obst\xE1culos, voltaje actual (110V o 220V).
-5. Cuando tengas suficiente informaci\xF3n y hayas confirmado si el recibo es mensual o bimestral, DEBES usar la herramienta "calcular_cotizacion_solar" para obtener los n\xFAmeros exactos y presentarlos al cliente.
-6. Una vez presentada la cotizaci\xF3n y el cliente muestre inter\xE9s en continuar, usa la herramienta "registrar_prospecto_calificado" para guardar el lead.
-7. Responde dudas usando tu base de conocimiento:
+REGLAS DE INTERACCI\xD3N (U-First & MCP):
+1. S\xE9 s\xFAper humana, amable y clara. Usa emojis con sutileza.
+2. NUNCA fuerces al cliente si no sabe un dato t\xE9cnico (ej: tipo de techo, distancia al medidor). Si dice "no s\xE9", "no estoy seguro", etc., responde emp\xE1ticamente ("\xA1No te preocupes! Nuestros ingenieros lo medir\xE1n en la visita t\xE9cnica gratuita") y avanza al siguiente paso.
+3. Ofrece la opci\xF3n de hablar con un agente humano cuando el usuario tenga dudas complejas o lo solicite expl\xEDcitamente.
+4. Tu respuesta DEBE SER UN OBJETO JSON V\xC1LIDO exactamente con la estructura definida a continuaci\xF3n.
 
----
-${faq}
----
+ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
+{
+  "next_step": number, // Paso actual o siguiente (1 a 6)
+  "message_to_user": "Texto del mensaje para enviar por WhatsApp",
+  "extracted_data": {
+    "bill_amount": number | null,
+    "roof_type": string | null,
+    "meter_distance": string | null,
+    "extra_loads": string | null,
+    "location": string | null,
+    "ownership": string | null
+  },
+  "trigger_human_handoff": boolean, // true si el usuario pide hablar con un agente o asesor humano
+  "handoff_reason": string | null,
+  "media_to_send": "FINANCIAMIENTO" | "INSTALACION_PROFESIONAL" | "COTIZACION_PDF" | null
+}`;
+    const cleanMessage = this.sanitizeInput(ctx.latestUserMessage);
+    const cleanName = this.sanitizeInput(ctx.userName || "Cliente");
+    const cleanHistory = this.sanitizeInput(ctx.historySummary || "");
+    const userContent = `<context>
+  <user_profile>
+    <phone>${ctx.phone}</phone>
+    <name>${cleanName}</name>
+  </user_profile>
+  <current_state>
+    <step>${ctx.currentStep}</step>
+    <bot_disabled>${ctx.botDisabled}</bot_disabled>
+    <data_collected>${JSON.stringify(ctx.extractedData)}</data_collected>
+  </current_state>
+  <history_summary>${cleanHistory}</history_summary>
+  <user_message>${cleanMessage}</user_message>
+</context>`;
+    return { systemPrompt, userContent };
+  }
+  /**
+   * Validates and parses the LLM output string to ensure it matches SofiaLlmResponse schema (SQA).
+   */
+  static parseResponse(rawResponse) {
+    try {
+      let jsonStr = rawResponse.trim();
+      if (jsonStr.startsWith("```json")) {
+        jsonStr = jsonStr.replace(/^```json\s*/, "").replace(/\s*```$/, "");
+      } else if (jsonStr.startsWith("```")) {
+        jsonStr = jsonStr.replace(/^```\s*/, "").replace(/\s*```$/, "");
+      }
+      const parsed = JSON.parse(jsonStr);
+      return {
+        next_step: typeof parsed.next_step === "number" ? parsed.next_step : 1,
+        message_to_user: parsed.message_to_user || "Hola, \xBFen qu\xE9 puedo ayudarte hoy?",
+        extracted_data: parsed.extracted_data || {},
+        trigger_human_handoff: Boolean(parsed.trigger_human_handoff),
+        handoff_reason: parsed.handoff_reason || void 0,
+        media_to_send: parsed.media_to_send || null
+      };
+    } catch (err) {
+      return {
+        next_step: 1,
+        message_to_user: rawResponse,
+        trigger_human_handoff: false,
+        media_to_send: null
+      };
+    }
+  }
+};
 
-REGLAS IMPORTANTES:
-- Nunca inventes precios ni calcules en tu mente. Siempre usa la herramienta "calcular_cotizacion_solar".
-- Al presentar la cotizaci\xF3n, lee cuidadosamente el JSON de respuesta. Usa exactamente los valores de 'monthlySavingsFormatted' y 'annualSavingsFormatted' para hablar de los ahorros. NO alteres los n\xFAmeros devueltos.
-- Mant\xE9n respuestas cortas y con saltos de l\xEDnea para WhatsApp.
-- Si el usuario ya pas\xF3 la calificaci\xF3n, no vuelvas a pedir su nombre ni su recibo.
-- Si el cliente da un monto de luz, pero no especifica periodo, preg\xFAntale "\xBFEse monto es mensual o bimestral?" antes de cotizar.
-`;
-var SOFIA_DEFINITION = {
-  id: "sofia",
-  name: "Sof\xEDa",
-  industry: "solar_energy",
-  systemPrompt: SOFIA_SYSTEM_PROMPT,
-  tools: ["calcular_cotizacion_solar", "registrar_prospecto_calificado"],
-  personality: {
-    tone: "warm_professional",
-    language: "es-MX",
-    greeting: "\xA1Hola! \u{1F44B} Soy Sof\xEDa, asesora de O3 Energy M\xE9xico. \xBFEn qu\xE9 puedo ayudarte hoy?"
+// server/infrastructure/services/QuotePdfService.ts
+import { PDFDocument, StandardFonts, rgb } from "pdf-lib";
+import fs from "fs";
+import path from "path";
+import { getApps } from "firebase-admin/app";
+import { getStorage } from "firebase-admin/storage";
+var QuotePdfService = class {
+  /**
+   * Generates an authentic binary PDF file on-the-fly matching O3 Energy corporate layout.
+   */
+  static async generateQuote(dto) {
+    const formattedCost = `$${dto.totalCostMxn.toLocaleString("es-MX")} MXN (IVA incluido)`;
+    const formattedMonthlySavings = `$${dto.monthlySavingsMxn.toLocaleString("es-MX")} MXN/mes`;
+    const formattedAnnualSavings = `$${dto.annualSavingsMxn.toLocaleString("es-MX")} MXN/a\xF1o`;
+    const textSummary = `\u{1F4CB} *PRESUPUESTO PRELIMINAR DE SISTEMA SOLAR* \u2600\uFE0F
+\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501
+\u{1F464} *Cliente:* ${dto.clientName}
+\u{1F4F1} *Contacto:* ${dto.clientPhone}
+\u{1F4CD} *Ubicaci\xF3n:* ${dto.location || "Chihuahua, Chih."}
+
+\u26A1 *DIAGN\xD3STICO ENERG\xC9TICO:*
+\u2022 Consumo reportado: $${dto.monthlyBillMxn.toLocaleString("es-MX")} MXN/mes
+\u2022 Sistema sugerido: *${dto.panelsCount} Paneles Solares* de Alta Eficiencia (${dto.systemPowerKwp.toFixed(1)} kWp)
+
+\u{1F4B0} *INVERSI\xD3N Y AHORRO ESTIMADO:*
+\u2022 Inversi\xF3n Total: *${formattedCost}*
+\u2022 Ahorro estimado mensual: *${formattedMonthlySavings}* (~90% de reducci\xF3n)
+\u2022 Ahorro estimado anual: *${formattedAnnualSavings}*
+\u2022 Retorno de Inversi\xF3n (ROI): *~2.5 a 3 a\xF1os*
+
+\u{1F381} *INCLUYE:*
+\u2705 Paneles solares nivel Tier 1 con 25 a\xF1os de garant\xEDa
+\u2705 Microinversores inteligentes
+\u2705 Tr\xE1mite de interconexi\xF3n ante CFE (100% incluido)
+\u2705 Estructura de aluminio anodizado anticorrosivo
+\u2705 Instalaci\xF3n t\xE9cnica profesional certificada
+
+\u26A0\uFE0F *NOTA IMPORTANTE:*
+_Este presupuesto es una estimaci\xF3n aproximada basada en tu consumo reportado. El presupuesto real y final se confirmar\xE1 tras la visita t\xE9cnica Gratuita de nuestros ingenieros a tu domicilio._`;
+    try {
+      const pdfDoc = await PDFDocument.create();
+      const page = pdfDoc.addPage([595.28, 841.89]);
+      const { width, height } = page.getSize();
+      const fontBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+      const fontRegular = await pdfDoc.embedFont(StandardFonts.Helvetica);
+      const fontOblique = await pdfDoc.embedFont(StandardFonts.HelveticaOblique);
+      const primaryOrange = rgb(0.92, 0.43, 0.12);
+      const darkNavy = rgb(0.1, 0.15, 0.25);
+      const lightBg = rgb(0.95, 0.96, 0.98);
+      const textDark = rgb(0.2, 0.2, 0.2);
+      let y = height - 50;
+      page.drawRectangle({
+        x: 0,
+        y: height - 100,
+        width,
+        height: 100,
+        color: darkNavy
+      });
+      page.drawText("O3 ENERGY M\xC9XICO", {
+        x: 40,
+        y: height - 45,
+        size: 22,
+        font: fontBold,
+        color: primaryOrange
+      });
+      page.drawText("PRESUPUESTO PRELIMINAR DE SISTEMA FOTOVOLTAICO", {
+        x: 40,
+        y: height - 70,
+        size: 11,
+        font: fontRegular,
+        color: rgb(1, 1, 1)
+      });
+      page.drawText(`Fecha: ${(/* @__PURE__ */ new Date()).toLocaleDateString("es-MX")}`, {
+        x: width - 180,
+        y: height - 45,
+        size: 10,
+        font: fontRegular,
+        color: rgb(0.9, 0.9, 0.9)
+      });
+      y = height - 130;
+      page.drawRectangle({
+        x: 40,
+        y: y - 70,
+        width: width - 80,
+        height: 75,
+        color: lightBg,
+        borderColor: rgb(0.85, 0.85, 0.85),
+        borderWidth: 1
+      });
+      page.drawText("DATOS DEL CLIENTE Y PROYECTO", {
+        x: 55,
+        y: y - 18,
+        size: 11,
+        font: fontBold,
+        color: darkNavy
+      });
+      page.drawText(`Cliente: ${dto.clientName}`, { x: 55, y: y - 38, size: 10, font: fontRegular, color: textDark });
+      page.drawText(`Tel\xE9fono: +${dto.clientPhone}`, { x: 55, y: y - 55, size: 10, font: fontRegular, color: textDark });
+      page.drawText(`Ubicaci\xF3n: ${dto.location || "Chihuahua, Chih."}`, { x: 300, y: y - 38, size: 10, font: fontRegular, color: textDark });
+      page.drawText(`Tipo de Techo: ${dto.roofType || "Residencial / Losa"}`, { x: 300, y: y - 55, size: 10, font: fontRegular, color: textDark });
+      y -= 105;
+      page.drawRectangle({
+        x: 40,
+        y: y - 145,
+        width: width - 80,
+        height: 150,
+        color: rgb(1, 1, 1),
+        borderColor: primaryOrange,
+        borderWidth: 1.5
+      });
+      page.drawText("RESUMEN DE COTIZACI\xD3N Y AHORRO ENERG\xC9TICO", {
+        x: 55,
+        y: y - 22,
+        size: 12,
+        font: fontBold,
+        color: primaryOrange
+      });
+      page.drawText(`Consumo Reportado CFE: $${dto.monthlyBillMxn.toLocaleString("es-MX")} MXN/mes`, { x: 55, y: y - 48, size: 10, font: fontRegular, color: textDark });
+      page.drawText(`Sistema Sugerido: ${dto.panelsCount} Paneles Solares (${dto.systemPowerKwp.toFixed(1)} kWp)`, { x: 55, y: y - 68, size: 11, font: fontBold, color: darkNavy });
+      page.drawText(`Inversi\xF3n Total Estimada: ${formattedCost}`, { x: 55, y: y - 88, size: 12, font: fontBold, color: primaryOrange });
+      page.drawText(`Ahorro Estimado Mensual: ${formattedMonthlySavings} (~90% reducci\xF3n)`, { x: 55, y: y - 108, size: 10, font: fontRegular, color: textDark });
+      page.drawText(`Ahorro Estimado Anual: ${formattedAnnualSavings}`, { x: 55, y: y - 128, size: 10, font: fontRegular, color: textDark });
+      y -= 175;
+      page.drawText("LO QUE INCLUYE NUESTRO SERVICIO INTEGRAL:", { x: 40, y, size: 11, font: fontBold, color: darkNavy });
+      y -= 20;
+      const items = [
+        "\u2022 Paneles solares de alta eficiencia Tier 1 con 25 a\xF1os de garant\xEDa",
+        "\u2022 Microinversores inteligentes con monitoreo en tiempo real",
+        "\u2022 Estrutura de aluminio anodizado altamente resistente y anticorrosiva",
+        "\u2022 Tr\xE1mite 100% completo de interconexi\xF3n ante CFE",
+        "\u2022 Instalaci\xF3n profesional por Ingenieros Certificados de O3 Energy"
+      ];
+      items.forEach((item) => {
+        page.drawText(item, { x: 50, y, size: 9.5, font: fontRegular, color: textDark });
+        y -= 18;
+      });
+      y -= 20;
+      page.drawRectangle({
+        x: 40,
+        y: y - 60,
+        width: width - 80,
+        height: 65,
+        color: rgb(0.99, 0.95, 0.9),
+        borderColor: primaryOrange,
+        borderWidth: 1
+      });
+      page.drawText("NOTA IMPORTANTE Y CONFIRMACI\xD3N DE VISITA T\xC9CNICA (SECCI\xD3N 5):", {
+        x: 52,
+        y: y - 18,
+        size: 9.5,
+        font: fontBold,
+        color: primaryOrange
+      });
+      const noteText = "Este presupuesto es una estimaci\xF3n aproximada basada en tu consumo reportado. El presupuesto real\ny final se confirmar\xE1 tras la visita t\xE9cnica GRATUITA de nuestros Ingenieros al sitio para evaluar inclinaci\xF3n,\nsombras y trayectoria el\xE9ctrica.";
+      const lines = noteText.split("\n");
+      let noteY = y - 32;
+      lines.forEach((l) => {
+        page.drawText(l, { x: 52, y: noteY, size: 8.5, font: fontOblique, color: darkNavy });
+        noteY -= 12;
+      });
+      page.drawText("O3 Energy M\xE9xico \u2014 L\xEDderes en Ingenier\xEDa Fotovoltaica | www.o3energy.mx", {
+        x: 100,
+        y: 25,
+        size: 8.5,
+        font: fontRegular,
+        color: rgb(0.5, 0.5, 0.5)
+      });
+      const pdfBytes = await pdfDoc.save();
+      const pdfBuffer = Buffer.from(pdfBytes);
+      const fileName = `Cotizacion_Solar_${dto.panelsCount}_Paneles_${dto.clientPhone.slice(-4)}.pdf`;
+      let pdfUrl = `${AppConfig.mediaBaseUrl}/${fileName}`;
+      try {
+        const publicDir = path.join(process.cwd(), "public", "images");
+        if (!fs.existsSync(publicDir)) {
+          fs.mkdirSync(publicDir, { recursive: true });
+        }
+        const filePath = path.join(publicDir, fileName);
+        fs.writeFileSync(filePath, pdfBuffer);
+      } catch (e) {
+        logger.warn("[QuotePdfService] Local public write warning:", e.message);
+      }
+      try {
+        if (getApps().length > 0) {
+          const storage = getStorage();
+          const bucket = storage.bucket();
+          const fileRef = bucket.file(`cotizaciones/${fileName}`);
+          await fileRef.save(pdfBuffer, { contentType: "application/pdf", public: true });
+          pdfUrl = `https://storage.googleapis.com/${bucket.name}/cotizaciones/${fileName}`;
+          logger.info(`[QuotePdfService] Uploaded PDF to Cloud Storage: ${pdfUrl}`);
+        }
+      } catch (cloudErr) {
+        logger.info("[QuotePdfService] Using local media URL fallback for PDF.");
+      }
+      logger.info(`[QuotePdfService] Generated dynamic PDF successfully: ${pdfUrl}`);
+      return {
+        success: true,
+        pdfUrl,
+        pdfBuffer,
+        textSummary
+      };
+    } catch (error) {
+      logger.error("Error generating Quote PDF in QuotePdfService:", error);
+      return {
+        success: false,
+        textSummary
+      };
+    }
+  }
+};
+
+// server/application/orchestration/SofiaFlowOrchestrator.ts
+var SofiaFlowOrchestrator = class {
+  constructor(conversationRepo, leadRepo, quoteEngine2, llmProvider2, sendWhatsAppText, emailService2) {
+    this.conversationRepo = conversationRepo;
+    this.leadRepo = leadRepo;
+    this.quoteEngine = quoteEngine2;
+    this.llmProvider = llmProvider2;
+    this.sendWhatsAppText = sendWhatsAppText;
+    this.emailService = emailService2;
+  }
+  async processMessage(input) {
+    const { tenantId, phone, userName, messageText } = input;
+    const conv = await this.conversationRepo.findByPhone(tenantId, phone);
+    if (conv.botDisabled) {
+      logger.info(`[SofiaFlowOrchestrator] Bot disabled for ${phone}. Skipping automated response.`);
+      return { replyText: "", nextStep: 6, botDisabled: true };
+    }
+    const currentStepInt = this.phaseToStepInt(conv.state.phase);
+    const promptCtx = {
+      phone,
+      userName: userName || conv.nombre,
+      currentStep: currentStepInt,
+      extractedData: {
+        billAmount: conv.state.monthlyBill,
+        roofType: conv.state.roofType,
+        meterDistance: conv.state.meterDistance,
+        extraLoads: conv.state.extraLoads,
+        location: conv.state.location,
+        ownership: conv.state.isOwner ? "Propio" : void 0
+      },
+      botDisabled: conv.botDisabled,
+      latestUserMessage: messageText,
+      historySummary: conv.messages.slice(-6).map((m) => `${m.sender}: ${m.text}`).join("\n")
+    };
+    const { systemPrompt, userContent } = SofiaPromptBuilder.buildPrompt(promptCtx);
+    const rawLlmOutput = await this.llmProvider.complete(
+      [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userContent }
+      ],
+      [],
+      0.2
+    );
+    const parsed = SofiaPromptBuilder.parseResponse(rawLlmOutput.text || "");
+    const mediaSent = [];
+    let finalReply = parsed.message_to_user;
+    if (parsed.extracted_data) {
+      if (parsed.extracted_data.bill_amount) {
+        conv.state.monthlyBill = parsed.extracted_data.bill_amount;
+        conv.montoRecibo = `$${parsed.extracted_data.bill_amount} MXN`;
+      }
+      if (parsed.extracted_data.roof_type) {
+        conv.state.roofType = parsed.extracted_data.roof_type;
+      }
+      if (parsed.extracted_data.ownership) {
+        conv.state.isOwner = parsed.extracted_data.ownership.toLowerCase().includes("propi") || parsed.extracted_data.ownership.toLowerCase().includes("propia");
+      }
+      if (parsed.extracted_data.meter_distance) {
+        conv.state.meterDistance = parsed.extracted_data.meter_distance;
+      }
+      if (parsed.extracted_data.location) {
+        conv.state.location = parsed.extracted_data.location;
+      }
+    }
+    if (parsed.next_step === 4 || parsed.next_step === 2 && conv.state.monthlyBill) {
+      const bill = conv.state.monthlyBill || 3500;
+      const calcResult = this.quoteEngine.calculate(bill);
+      const quoteDto = {
+        clientName: conv.nombre || userName || "Cliente",
+        clientPhone: phone,
+        monthlyBillMxn: bill,
+        panelsCount: calcResult.panels,
+        systemPowerKwp: calcResult.systemPowerKw,
+        totalCostMxn: calcResult.estimatedCost,
+        monthlySavingsMxn: calcResult.monthlySavings,
+        annualSavingsMxn: calcResult.annualSavings,
+        roofType: conv.state.roofType,
+        location: conv.state.location
+      };
+      const pdfResult = await QuotePdfService.generateQuote(quoteDto);
+      finalReply = `${pdfResult.textSummary}
+
+${parsed.message_to_user}`;
+    }
+    if (parsed.media_to_send === "FINANCIAMIENTO" || parsed.next_step === 2) {
+      const imgUrl = `${AppConfig.mediaBaseUrl}/FINANCIAMIENTO.jpeg`;
+      mediaSent.push(imgUrl);
+    } else if (parsed.media_to_send === "INSTALACION_PROFESIONAL") {
+      const imgUrl = `${AppConfig.mediaBaseUrl}/INSTALACION_PROFESIONAL.jpeg`;
+      mediaSent.push(imgUrl);
+    }
+    let isHandoff = parsed.trigger_human_handoff;
+    if (messageText.toLowerCase().includes("asesor") || messageText.toLowerCase().includes("humano") || messageText.toLowerCase().includes("agente")) {
+      isHandoff = true;
+    }
+    if (isHandoff) {
+      conv.botDisabled = true;
+      conv.state.phase = "HUMAN_HANDOFF";
+      finalReply = `\xA1Con mucho gusto! En un momento uno de nuestros asesores especializados de O3 Energy se pondr\xE1 en contacto contigo directamente a trav\xE9s de este chat para brindarte atenci\xF3n personalizada. \u2600\uFE0F
+
+\xA1Que tengas un excelente d\xEDa!`;
+      await this.triggerLeadHandoff(conv, phone, userName || conv.nombre, parsed.handoff_reason || "Solicitud de cliente");
+    } else {
+      conv.state.phase = this.stepIntToPhase(parsed.next_step);
+    }
+    conv.messages.push({ sender: "user", text: messageText, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
+    conv.messages.push({ sender: "bot", text: finalReply, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
+    conv.lastMessageAt = (/* @__PURE__ */ new Date()).toISOString();
+    await this.conversationRepo.save(conv);
+    return {
+      replyText: finalReply,
+      nextStep: parsed.next_step,
+      botDisabled: conv.botDisabled,
+      mediaSent: mediaSent.length > 0 ? mediaSent : void 0
+    };
+  }
+  phaseToStepInt(phase) {
+    switch (phase) {
+      case "GREETING":
+        return 1;
+      case "QUALIFICATION":
+        return 2;
+      case "TECHNICAL_SURVEY":
+        return 3;
+      case "QUOTATION":
+        return 4;
+      case "FINANCING":
+        return 5;
+      case "CLOSING":
+      case "HUMAN_HANDOFF":
+      case "LEAD_GENERATED":
+        return 6;
+      default:
+        return 1;
+    }
+  }
+  stepIntToPhase(step) {
+    switch (step) {
+      case 1:
+        return "GREETING";
+      case 2:
+        return "QUALIFICATION";
+      case 3:
+        return "TECHNICAL_SURVEY";
+      case 4:
+        return "QUOTATION";
+      case 5:
+        return "FINANCING";
+      case 6:
+        return "CLOSING";
+      default:
+        return "GREETING";
+    }
+  }
+  async triggerLeadHandoff(conv, phone, name, reason) {
+    try {
+      const lead = {
+        id: phone,
+        tenantId: conv.tenantId,
+        phone,
+        nombre: name,
+        montoRecibo: `$${conv.state.monthlyBill || 0} MXN`,
+        sistemaEstimado: `${conv.state.roofType || "Residencial"}`,
+        costoEstimado: "Cotizaci\xF3n solicitada",
+        leadScore: 85,
+        status: "pending_review",
+        privateNotes: `Lead derivado a asesor humano. Razon: ${reason}`,
+        createdAt: (/* @__PURE__ */ new Date()).toISOString()
+      };
+      await this.leadRepo.save(lead);
+      await this.emailService.sendLeadNotification({
+        leadName: name,
+        phone,
+        monthlyBill: conv.state.monthlyBill || 0,
+        notes: `Solicitud de atenci\xF3n humana en WhatsApp: ${reason}`
+      });
+      logger.info(`[SofiaFlowOrchestrator] Lead handoff email sent for ${phone}`);
+    } catch (err) {
+      logger.error(`[SofiaFlowOrchestrator] Lead handoff email trigger failed:`, err);
+    }
   }
 };
 
 // server/infrastructure/web/container.ts
-import { getApps } from "firebase-admin/app";
+import { getApps as getApps2 } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
+import nodemailer from "nodemailer";
 var quoteEngine = new SolarQuoteEngine();
 var llmProvider = new GroqProvider();
+var emailService = {
+  async sendLeadNotification(leadData) {
+    const { server, port, user, pass, salesEmail } = AppConfig.smtp;
+    if (!pass) {
+      logger.info("[Email SIM] \u2192 Sales Team Lead Notification:", leadData);
+      return true;
+    }
+    try {
+      const transporter = nodemailer.createTransport({
+        host: server,
+        port,
+        secure: port === 465,
+        auth: { user, pass }
+      });
+      await transporter.sendMail({
+        from: `"Sof\xEDa IA - O3 Energy" <${user}>`,
+        to: salesEmail,
+        subject: `\u{1F525} NUEVO LEAD CALIFICADO SOLAR: ${leadData.leadName} (+${leadData.phone})`,
+        text: `Se ha derivado un nuevo prospecto calificado desde WhatsApp:
+
+Cliente: ${leadData.leadName}
+Tel\xE9fono: +${leadData.phone}
+Recibo CFE Estimado: $${leadData.monthlyBill} MXN
+Notas: ${leadData.notes || "Ninguna"}
+
+Favor de atender este chat de inmediato.`
+      });
+      logger.info(`[EmailService] Notification sent for lead +${leadData.phone}`);
+      return true;
+    } catch (err) {
+      logger.error("[EmailService] Failed to send email:", err);
+      return false;
+    }
+  }
+};
 async function sendWhatsAppMessage(phone, text) {
   const { accessToken, phoneNumberId } = AppConfig.meta;
   if (!accessToken) {
@@ -688,37 +982,57 @@ async function sendWhatsAppMessage(phone, text) {
         logger.error("[WhatsApp] Send failed", data);
         return false;
       }
-      logger.info(`[WhatsApp] Sent successfully to +${phone}`, { messageId: data.messages?.[0]?.id });
+      logger.info(`[WhatsApp] Sent text successfully to +${phone}`, { messageId: data.messages?.[0]?.id });
       return true;
     } catch (err) {
       logger.error("[WhatsApp] Exception", { error: err.message });
       return false;
     }
   }
-  try {
-    const res = await fetch(`https://graph.facebook.com/v20.0/me/messages`, {
-      method: "POST",
-      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        recipient: { id: phone },
-        message: { text }
-      })
-    });
-    if (!res.ok) {
-      const err = await res.json();
-      logger.error("[Messenger] Send failed", err);
+  return false;
+}
+async function sendWhatsAppMedia(phone, mediaUrl, caption) {
+  const { accessToken, phoneNumberId } = AppConfig.meta;
+  if (!accessToken) {
+    logger.info(`[WhatsApp SIM Media] \u2192 +${phone}: Link=${mediaUrl}`);
+    return true;
+  }
+  if (phoneNumberId) {
+    try {
+      const isPdf = mediaUrl.endsWith(".pdf");
+      const payload = {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to: phone,
+        type: isPdf ? "document" : "image"
+      };
+      if (isPdf) {
+        payload.document = { link: mediaUrl, caption: caption || "Cotizaci\xF3n Solar O3 Energy" };
+      } else {
+        payload.image = { link: mediaUrl, caption: caption || "" };
+      }
+      const res = await fetch(`https://graph.facebook.com/v20.0/${phoneNumberId}/messages`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        logger.error("[WhatsApp Media] Send failed", data);
+        return false;
+      }
+      logger.info(`[WhatsApp Media] Sent successfully to +${phone}`, { mediaUrl });
+      return true;
+    } catch (err) {
+      logger.error("[WhatsApp Media] Exception", { error: err.message });
       return false;
     }
-    logger.info(`[Messenger] Sent successfully to PSID ${phone}`);
-    return true;
-  } catch (err) {
-    logger.error("[Messenger] Exception", { error: err.message });
-    return false;
   }
+  return false;
 }
 function getRepos() {
   try {
-    if (getApps().length > 0) {
+    if (getApps2().length > 0) {
       const db2 = getFirestore();
       logger.info("[DI] Using Firestore repositories (multi-tenant)");
       return {
@@ -750,8 +1064,20 @@ function initRepositories(db2) {
 }
 function buildReceiveMessageUseCase() {
   const repos = _convRepo && _leadRepo ? { convRepo: _convRepo, leadRepo: _leadRepo } : getRepos();
-  const orchestrator = new LLMOrchestrator(llmProvider, quoteEngine, repos.leadRepo, repos.convRepo);
-  return new ReceiveMessageUseCase(repos.convRepo, orchestrator, SOFIA_DEFINITION, sendWhatsAppMessage);
+  const flowOrchestrator = new SofiaFlowOrchestrator(
+    repos.convRepo,
+    repos.leadRepo,
+    quoteEngine,
+    llmProvider,
+    sendWhatsAppMessage,
+    emailService
+  );
+  return new ReceiveMessageUseCase(
+    repos.convRepo,
+    flowOrchestrator,
+    sendWhatsAppMessage,
+    sendWhatsAppMedia
+  );
 }
 
 // server/infrastructure/web/v2Router.ts
@@ -1034,7 +1360,7 @@ var isInMemory = false;
 var inMemoryChats = {};
 var inMemoryLeads = {};
 function initFirebase() {
-  if (getApps2().length > 0) {
+  if (getApps3().length > 0) {
     const dbId = firebaseConfig.firestoreDatabaseId;
     db = dbId && dbId !== "(default)" ? getFirestore2(dbId) : getFirestore2();
     return;

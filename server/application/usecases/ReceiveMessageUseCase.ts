@@ -1,6 +1,5 @@
 import { IConversationRepository } from '../../domain/repositories/IConversationRepository.js';
-import { LLMOrchestrator } from '../orchestrators/LLMOrchestrator.js';
-import { AgentDefinition } from '../../interfaces/IAgentFactory.js';
+import { SofiaFlowOrchestrator } from '../orchestration/SofiaFlowOrchestrator.js';
 import { logger } from '../../shared/logger/ConsoleLogger.js';
 import { AppConfig } from '../../shared/config/AppConfig.js';
 
@@ -14,51 +13,48 @@ interface IncomingMessage {
 export class ReceiveMessageUseCase {
   constructor(
     private convRepo: IConversationRepository,
-    private orchestrator: LLMOrchestrator,
-    private agent: AgentDefinition,
+    private orchestrator: SofiaFlowOrchestrator,
     private sendWhatsApp: (phone: string, text: string) => Promise<boolean>,
+    private sendWhatsAppMedia: (phone: string, mediaUrl: string, caption?: string) => Promise<boolean>
   ) {}
 
   async execute(input: IncomingMessage): Promise<{ reply: string; leadGenerated: boolean }> {
     const tenantId = input.tenantId || AppConfig.tenant.defaultId;
-    // Preserve exact phone number for accurate Meta Graph API routing
+    // Preserve exact phone number for accurate Meta Graph API routing (HRU / Bug Prevention)
     const phone = input.phone.replace(/[^\d]/g, '');
 
-    logger.info('[ReceiveMessageUseCase] Message received', { phone, tenantId, text: input.text.substring(0, 60) });
+    logger.info('[ReceiveMessageUseCase] Message received', {
+      phone,
+      tenantId,
+      text: input.text.substring(0, 60),
+    });
 
-    // Load conversation from repository
-    let conversation = await this.convRepo.findByPhone(tenantId, phone);
+    // 1. Process message through 6-step state machine orchestrator
+    const result = await this.orchestrator.processMessage({
+      tenantId,
+      phone,
+      userName: input.name,
+      messageText: input.text,
+    });
 
-    // Update name if we have one and it was generic
-    if (input.name && conversation.nombre === 'Cliente') {
-      conversation.nombre = input.name;
+    // 2. Send text response via WhatsApp
+    if (result.replyText) {
+      await this.sendWhatsApp(phone, result.replyText);
     }
 
-    // If bot is disabled (human handoff), just store message and return
-    if (conversation.botDisabled) {
-      conversation.messages.push({ sender: 'user', text: input.text, timestamp: new Date().toISOString() });
-      conversation.lastMessageAt = new Date().toISOString();
-      await this.convRepo.save(conversation);
-      logger.info('[ReceiveMessageUseCase] Bot disabled — message stored for human agent', { phone });
-      return { reply: '', leadGenerated: false };
+    // 3. Send media attachments if specified by step
+    if (result.mediaSent && result.mediaSent.length > 0) {
+      for (const mediaUrl of result.mediaSent) {
+        await this.sendWhatsAppMedia(phone, mediaUrl);
+      }
     }
 
-    // Run the agent
-    const { replyText, updatedConversation, leadGenerated } = await this.orchestrator.run(
-      this.agent,
-      conversation,
-      input.text,
-    );
+    logger.info('[ReceiveMessageUseCase] Execution finished', {
+      phone,
+      nextStep: result.nextStep,
+      botDisabled: result.botDisabled,
+    });
 
-    // Persist updated conversation
-    await this.convRepo.save(updatedConversation);
-
-    // Send WhatsApp reply
-    if (replyText) {
-      await this.sendWhatsApp(phone, replyText);
-    }
-
-    logger.info('[ReceiveMessageUseCase] Done', { phone, leadGenerated, replyLength: replyText.length });
-    return { reply: replyText, leadGenerated };
+    return { reply: result.replyText, leadGenerated: result.botDisabled };
   }
 }
