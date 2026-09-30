@@ -747,6 +747,9 @@ var SofiaFlowOrchestrator = class {
   async processMessage(input) {
     const { tenantId, phone, userName, messageText } = input;
     const conv = await this.conversationRepo.findByPhone(tenantId, phone);
+    if (!conv.state.completedSteps) {
+      conv.state.completedSteps = [];
+    }
     if (conv.botDisabled) {
       logger.info(`[SofiaFlowOrchestrator] Bot disabled for ${phone}. Skipping automated response.`);
       return { replyText: "", nextStep: 6, botDisabled: true };
@@ -798,7 +801,10 @@ var SofiaFlowOrchestrator = class {
         conv.state.location = parsed.extracted_data.location;
       }
     }
-    if (parsed.next_step === 4 || parsed.next_step === 2 && conv.state.monthlyBill) {
+    const userExplicitlyRequestedQuote = messageText.toLowerCase().includes("cotizac") || messageText.toLowerCase().includes("presupuesto") || messageText.toLowerCase().includes("dame el precio") || messageText.toLowerCase().includes("cuanto cuesta");
+    const isQuoteNotYetSent = !conv.state.completedSteps.includes("QUOTE_SENT");
+    const isEnteringStep4 = parsed.next_step === 4 || currentStepInt < 4 && parsed.next_step >= 4;
+    if (isEnteringStep4 && isQuoteNotYetSent || userExplicitlyRequestedQuote && conv.state.monthlyBill) {
       const bill = conv.state.monthlyBill || 3500;
       const calcResult = this.quoteEngine.calculate(bill);
       const quoteDto = {
@@ -817,13 +823,16 @@ var SofiaFlowOrchestrator = class {
       finalReply = `${pdfResult.textSummary}
 
 ${parsed.message_to_user}`;
+      conv.state.completedSteps.push("QUOTE_SENT");
     }
-    if (parsed.media_to_send === "FINANCIAMIENTO" || parsed.next_step === 2) {
+    if (parsed.media_to_send === "FINANCIAMIENTO" && !conv.state.completedSteps.includes("MEDIA_FINANCIAMIENTO_SENT")) {
       const imgUrl = `${AppConfig.mediaBaseUrl}/FINANCIAMIENTO.jpeg`;
       mediaSent.push(imgUrl);
-    } else if (parsed.media_to_send === "INSTALACION_PROFESIONAL") {
+      conv.state.completedSteps.push("MEDIA_FINANCIAMIENTO_SENT");
+    } else if (parsed.media_to_send === "INSTALACION_PROFESIONAL" && !conv.state.completedSteps.includes("MEDIA_INSTALACION_SENT")) {
       const imgUrl = `${AppConfig.mediaBaseUrl}/INSTALACION_PROFESIONAL.jpeg`;
       mediaSent.push(imgUrl);
+      conv.state.completedSteps.push("MEDIA_INSTALACION_SENT");
     }
     let isHandoff = parsed.trigger_human_handoff;
     if (messageText.toLowerCase().includes("asesor") || messageText.toLowerCase().includes("humano") || messageText.toLowerCase().includes("agente")) {
