@@ -7,6 +7,7 @@ import { AppConfig } from '../../shared/config/AppConfig.js';
 import { logger } from '../../shared/logger/ConsoleLogger.js';
 import { buildReceiveMessageUseCase, convRepo, leadRepo } from './container.js';
 import { AuthService, JwtPayload } from '../services/AuthService.js';
+import { GoogleAuthService } from '../services/GoogleAuthService.js';
 import { RateLimiterService } from '../services/RateLimiterService.js';
 import { AuditLogService } from '../services/AuditLogService.js';
 import { getClientIp } from '../../shared/utils/ipUtils.js';
@@ -134,6 +135,44 @@ v2Router.post('/auth/login', authRateLimiter, async (req: Request, res: Response
     message: 'Inicio de sesión exitoso',
     user,
     token, // Optional for external API clients
+  });
+});
+
+// ─── Google OAuth Endpoint ────────────────────────────────────────────────
+
+v2Router.post('/auth/google', authRateLimiter, async (req: Request, res: Response) => {
+  const ip = getClientIp(req);
+  const { idToken } = req.body || {};
+
+  if (!idToken || typeof idToken !== 'string') {
+    return res.status(400).json({ error: 'Se requiere un ID Token de Google válido.' });
+  }
+
+  const googleUser = await GoogleAuthService.verifyGoogleToken(idToken);
+
+  if (!googleUser) {
+    await RateLimiterService.registerFailedAttempt(ip);
+    return res.status(401).json({ error: 'Token de Google inválido o expirado.' });
+  }
+
+  await RateLimiterService.resetRateLimit(ip);
+
+  const user = {
+    id: googleUser.uid,
+    email: googleUser.email,
+    role: 'admin' as const, // Demo mode: any Google user gets admin role
+  };
+
+  const token = AuthService.generateToken(user);
+  const cookieHeader = AuthService.createHttpOnlyCookie(token);
+  res.setHeader('Set-Cookie', cookieHeader);
+
+  logger.info('[Auth] Successful Google OAuth login', { email: googleUser.email, ip });
+
+  return res.json({
+    success: true,
+    message: 'Inicio de sesión con Google exitoso',
+    user,
   });
 });
 

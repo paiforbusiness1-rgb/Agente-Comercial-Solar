@@ -5,12 +5,21 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
+import { initializeApp, getApps } from 'firebase/app';
+import { getAuth, signInWithPopup, GoogleAuthProvider } from 'firebase/auth';
+import firebaseConfig from '../../firebase-applet-config.json';
 
 export interface User {
   id: string;
   email: string;
   role: 'admin' | 'agent' | 'viewer';
 }
+
+// Initialize Firebase client app (idempotent)
+const firebaseApp = getApps().length === 0
+  ? initializeApp(firebaseConfig)
+  : getApps()[0];
+const googleProvider = new GoogleAuthProvider();
 
 export function useAuth() {
   const [user, setUser] = useState<User | null>(null);
@@ -87,6 +96,49 @@ export function useAuth() {
   };
 
   /**
+   * Authenticates user via Google OAuth popup → Firebase ID Token → backend /auth/google
+   */
+  const loginWithGoogle = async (): Promise<boolean> => {
+    setIsLoading(true);
+    setError(null);
+
+    try {
+      const auth = getAuth(firebaseApp);
+      const result = await signInWithPopup(auth, googleProvider);
+      const idToken = await result.user.getIdToken();
+
+      const res = await fetch('/api/v2/auth/google', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+        body: JSON.stringify({ idToken }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        setError(data.error || 'Error al iniciar sesión con Google');
+        setIsLoading(false);
+        return false;
+      }
+
+      setUser(data.user);
+      setIsAuthenticated(true);
+      setIsLoading(false);
+      return true;
+    } catch (err: any) {
+      // Firebase popup errors (cancelled by user, popup blocked, etc.)
+      if (err.code === 'auth/popup-closed-by-user' || err.code === 'auth/cancelled-popup-request') {
+        setError(null); // Not a real error — user cancelled
+      } else {
+        setError(err.message || 'Error al conectar con Google');
+      }
+      setIsLoading(false);
+      return false;
+    }
+  };
+
+  /**
    * Logs out user by calling /api/v2/auth/logout
    */
   const logout = async () => {
@@ -112,6 +164,7 @@ export function useAuth() {
     isLoading,
     error,
     login,
+    loginWithGoogle,
     logout,
     checkAuthStatus,
   };

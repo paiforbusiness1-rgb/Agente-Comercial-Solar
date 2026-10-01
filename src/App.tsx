@@ -38,7 +38,7 @@ export default function App() {
   const copilotEndRef = useRef<HTMLDivElement>(null);
 
   // --- HOOKS DE AUTENTICACIÓN ---
-  const { user, isAuthenticated, isLoading: isAuthLoading, error: authError, login, logout } = useAuth();
+  const { user, isAuthenticated, isLoading: isAuthLoading, error: authError, login, loginWithGoogle, logout } = useAuth();
 
   // --- HOOKS DE NEGOCIO ---
   const { toastMessage, showToast, notificationPermission, requestNotificationPermission, triggerBrowserNotification } = useNotifications();
@@ -80,10 +80,11 @@ export default function App() {
   // Si NO está autenticado -> Renderiza Pantalla de Login (Refinamiento A)
   if (!isAuthenticated) {
     return (
-      <LoginView 
-        onLogin={login} 
-        isLoading={isAuthLoading} 
-        error={authError} 
+      <LoginView
+        onLogin={login}
+        onGoogleLogin={loginWithGoogle}
+        isLoading={isAuthLoading}
+        error={authError}
       />
     );
   }
