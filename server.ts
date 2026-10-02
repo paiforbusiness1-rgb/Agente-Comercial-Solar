@@ -13,6 +13,7 @@ import nodemailer from 'nodemailer';
 import fs from 'fs';
 import firebaseConfig from './firebase-applet-config.json';
 import { buildReceiveMessageUseCase, initRepositories } from './server/infrastructure/web/container.js';
+import { v2Router } from './server/infrastructure/web/v2Router.js';
 
 const app = express();
 const PORT = 3000;
@@ -65,6 +66,9 @@ try {
 
 // Wire the clean-architecture container to the same Firebase state
 initRepositories(db);
+
+// Mount v2 Router (Clean Architecture / Tool Calling)
+app.use('/api/v2', v2Router);
 
 // Helper to access chats collection
 async function getChatDoc(phone: string): Promise<any> {

@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Sparkles, Bell, BellOff, Server, Menu, ChevronLeft, Loader2 } from 'lucide-react';
 
@@ -44,11 +44,16 @@ export default function App() {
   // --- HOOKS DE NEGOCIO ---
   const { toastMessage, showToast, notificationPermission, requestNotificationPermission, triggerBrowserNotification } = useNotifications();
 
-  const { chats, setChats, leads, setLeads, isLoading, isFirebaseConnected, lastRefreshed } = useFirebase({
-    onNewLeadNotification: (lead) => triggerBrowserNotification(lead, () => {
+  // Refinamiento 1: Callback de notificación memoizado con dependencias estables (Regla 2 Zero Regressions)
+  const handleNewLeadNotification = useCallback((lead: QualifiedLead) => {
+    triggerBrowserNotification(lead, () => {
       setActiveTab('leads');
       setLeadsSearch('');
-    })
+    });
+  }, [triggerBrowserNotification]);
+
+  const { chats, setChats, leads, setLeads, isLoading, isFirebaseConnected, lastRefreshed, refreshChats } = useFirebase({
+    onNewLeadNotification: handleNewLeadNotification
   });
 
   const { 
@@ -233,6 +238,7 @@ export default function App() {
               isDarkMode={isDarkMode}
               chats={chats}
               setChats={setChats}
+              refreshChats={refreshChats}
               chatSearch={chatSearch}
               setChatSearch={setChatSearch}
               selectedChatPhone={selectedChatPhone}

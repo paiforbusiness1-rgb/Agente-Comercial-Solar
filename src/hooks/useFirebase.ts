@@ -18,6 +18,36 @@ export function useFirebase({ onNewLeadNotification }: UseFirebaseProps) {
   const seenLeadIdsRef = useRef<Set<string>>(new Set());
   const isFirstLeadsLoadRef = useRef(true);
 
+  // Keep a stable ref to the notification callback to prevent tearing down listeners on parent re-renders
+  const onNewLeadNotificationRef = useRef(onNewLeadNotification);
+  useEffect(() => {
+    onNewLeadNotificationRef.current = onNewLeadNotification;
+  }, [onNewLeadNotification]);
+
+  // Silent background refresh function (Refinamiento 3: No UI flicker, credentials: include)
+  const refreshChats = async () => {
+    try {
+      const chatsRes = await fetch('/api/v2/chats', {
+        method: 'GET',
+        headers: { 'Content-Type': 'application/json' },
+        credentials: 'include',
+      });
+      if (chatsRes.ok) {
+        const chatsData: Chat[] = await chatsRes.json();
+        setChats(
+          chatsData
+            .filter((c) => (c as any).status !== 'deleted')
+            .map((c) => ({
+              ...c,
+              phone: c.phone || c.id,
+            }))
+        );
+      }
+    } catch (err) {
+      console.warn('[useFirebase] Error en refresco silencioso de chats:', err);
+    }
+  };
+
   useEffect(() => {
     let unsubscribeChats: () => void = () => {};
     let unsubscribeLeads: () => void = () => {};
@@ -33,8 +63,15 @@ export function useFirebase({ onNewLeadNotification }: UseFirebaseProps) {
         });
         if (chatsRes.ok) {
           const chatsData: Chat[] = await chatsRes.json();
-          // Filter out soft-deleted chats
-          setChats(chatsData.filter((c) => (c as any).status !== 'deleted'));
+          // Filter out soft-deleted chats and ensure phone is normalized
+          setChats(
+            chatsData
+              .filter((c) => (c as any).status !== 'deleted')
+              .map((c) => ({
+                ...c,
+                phone: c.phone || c.id,
+              }))
+          );
         }
         
         const leadsRes = await fetch('/api/v2/leads', {
@@ -54,7 +91,7 @@ export function useFirebase({ onNewLeadNotification }: UseFirebaseProps) {
             leadsData.forEach((lead) => {
               if (!seenLeadIdsRef.current.has(lead.id)) {
                 seenLeadIdsRef.current.add(lead.id);
-                onNewLeadNotification(lead);
+                onNewLeadNotificationRef.current(lead);
               }
             });
           }
@@ -89,9 +126,13 @@ export function useFirebase({ onNewLeadNotification }: UseFirebaseProps) {
         const chatsList: Chat[] = [];
         snapshot.forEach((doc) => {
           const data = doc.data() as any;
-          // Filter out soft-deleted chats in real-time
+          // Filter out soft-deleted chats in real-time and ensure phone is normalized
           if (data.status !== 'deleted') {
-            chatsList.push({ id: doc.id, ...data });
+            chatsList.push({
+              id: doc.id,
+              phone: data.phone || doc.id,
+              ...data,
+            });
           }
         });
         setChats(chatsList);
@@ -123,7 +164,7 @@ export function useFirebase({ onNewLeadNotification }: UseFirebaseProps) {
               if (!seenLeadIdsRef.current.has(docId)) {
                 seenLeadIdsRef.current.add(docId);
                 const leadData = { id: docId, ...change.doc.data() } as QualifiedLead;
-                onNewLeadNotification(leadData);
+                onNewLeadNotificationRef.current(leadData);
               }
             }
           });
@@ -144,7 +185,7 @@ export function useFirebase({ onNewLeadNotification }: UseFirebaseProps) {
       unsubscribeLeads();
       if (pollInterval) clearInterval(pollInterval);
     };
-  }, [onNewLeadNotification]);
+  }, []);
 
   return {
     chats,
@@ -153,6 +194,7 @@ export function useFirebase({ onNewLeadNotification }: UseFirebaseProps) {
     setLeads,
     isLoading,
     isFirebaseConnected,
-    lastRefreshed
+    lastRefreshed,
+    refreshChats,
   };
 }

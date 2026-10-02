@@ -151,7 +151,11 @@ export class FirestoreConversationRepository implements IConversationRepository 
         .collection(`tenants/${tenantId}/chats`)
         .orderBy('lastMessageAt', 'desc')
         .get();
-      const all: Conversation[] = snap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+      const all: Conversation[] = snap.docs.map((d: any) => ({
+        id: d.id,
+        phone: d.data().phone || d.id,
+        ...d.data(),
+      }));
       return all.filter((c) => c.status !== 'deleted');
     } catch (err: any) {
       logger.warn('[FirestoreConversationRepo] Fallback to In-Memory for findAll', { error: err.message });
@@ -165,14 +169,22 @@ export class FirestoreConversationRepository implements IConversationRepository 
       const deletedSnap = await this.db
         .collection(`tenants/${tenantId}/deleted_chats`)
         .get();
-      const archived: Conversation[] = deletedSnap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+      const archived: Conversation[] = deletedSnap.docs.map((d: any) => ({
+        id: d.id,
+        phone: d.data().phone || d.id,
+        ...d.data(),
+      }));
 
       // 2. Query legacy soft-deleted in chats collection for backward compatibility
       const legacySnap = await this.db
         .collection(`tenants/${tenantId}/chats`)
         .where('status', '==', 'deleted')
         .get();
-      const legacy: Conversation[] = legacySnap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+      const legacy: Conversation[] = legacySnap.docs.map((d: any) => ({
+        id: d.id,
+        phone: d.data().phone || d.id,
+        ...d.data(),
+      }));
 
       const combinedMap = new Map<string, Conversation>();
       archived.forEach(c => combinedMap.set(c.phone || c.id, c));

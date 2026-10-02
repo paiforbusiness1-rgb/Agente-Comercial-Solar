@@ -7,6 +7,7 @@ interface ChatsViewProps {
   isDarkMode: boolean;
   chats: Chat[];
   setChats?: React.Dispatch<React.SetStateAction<Chat[]>>;
+  refreshChats?: () => Promise<void>;
   chatSearch: string;
   setChatSearch: (val: string) => void;
   selectedChatPhone: string | null;
@@ -22,6 +23,7 @@ export const ChatsView: React.FC<ChatsViewProps> = ({
   isDarkMode,
   chats,
   setChats,
+  refreshChats,
   chatSearch,
   setChatSearch,
   selectedChatPhone,
@@ -110,8 +112,10 @@ export const ChatsView: React.FC<ChatsViewProps> = ({
     if (!chatToDelete) return;
     setIsDeleting(true);
 
+    const deleteIdentifier = chatToDelete.phone || chatToDelete.id;
+
     try {
-      const res = await fetch(`/api/v2/chats/${chatToDelete.phone}`, {
+      const res = await fetch(`/api/v2/chats/${deleteIdentifier}`, {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         credentials: 'include',
@@ -120,13 +124,31 @@ export const ChatsView: React.FC<ChatsViewProps> = ({
       const data = await res.json();
 
       if (res.ok) {
-        showToast(`🗑️ Chat de +${chatToDelete.phone} archivado en la Papelera`);
-        const phoneToRemove = chatToDelete.phone;
-        if (selectedChatPhone === phoneToRemove) {
+        showToast(`🗑️ Chat de +${deleteIdentifier} archivado en la Papelera`);
+        
+        const targetDigits = String(deleteIdentifier).replace(/\D/g, '');
+        const targetId = String(chatToDelete.id || '');
+
+        // Refinamiento 2: Salvaguarda de longitud mínima (>= 8) para regex de teléfonos
+        if (setChats) {
+          setChats((prev) => prev.filter((c) => {
+            const cDigits = String(c.phone || c.id || '').replace(/\D/g, '');
+            const isPhoneMatch = targetDigits.length >= 8 && cDigits.length >= 8 && cDigits === targetDigits;
+            const isIdMatch = Boolean(targetId && String(c.id) === targetId);
+            return !(isPhoneMatch || isIdMatch);
+          }));
+        }
+
+        // Deselección segura del panel principal si el chat eliminado estaba activo
+        const selDigits = String(selectedChatPhone || '').replace(/\D/g, '');
+        const isSelectedMatch = (targetDigits.length >= 8 && selDigits.length >= 8 && selDigits === targetDigits) || (selectedChatPhone === targetId);
+        if (isSelectedMatch) {
           setSelectedChatPhone(null);
         }
-        if (setChats) {
-          setChats((prev) => prev.filter((c) => c.phone !== phoneToRemove));
+
+        // Refinamiento 3: Reconciliación silenciosa con el servidor (sin spinners globales ni flicker)
+        if (refreshChats) {
+          await refreshChats();
         }
         fetchTrashChats();
       } else {
@@ -153,9 +175,24 @@ export const ChatsView: React.FC<ChatsViewProps> = ({
 
       if (res.ok) {
         showToast(`♻️ Chat +${phone} restaurado a la lista activa`);
-        setTrashedChats((prev) => prev.filter((c) => c.phone !== phone));
+        
+        const targetDigits = String(phone).replace(/\D/g, '');
+
+        // Refinamiento 2: Salvaguarda de longitud mínima (>= 8) en lista de papelera
+        setTrashedChats((prev) => prev.filter((c) => {
+          const cDigits = String(c.phone || c.id || '').replace(/\D/g, '');
+          const isPhoneMatch = targetDigits.length >= 8 && cDigits.length >= 8 && cDigits === targetDigits;
+          const isIdMatch = String(c.id) === phone;
+          return !(isPhoneMatch || isIdMatch);
+        }));
+
         if (selectedChatPhone === phone) {
           setSelectedChatPhone(null);
+        }
+
+        // Refinamiento 3: Reconciliación silenciosa para que el chat reaparezca inmediatamente en activos
+        if (refreshChats) {
+          await refreshChats();
         }
         fetchTrashChats();
       } else {

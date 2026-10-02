@@ -405,7 +405,11 @@ var FirestoreConversationRepository = class {
   async findAll(tenantId) {
     try {
       const snap = await this.db.collection(`tenants/${tenantId}/chats`).orderBy("lastMessageAt", "desc").get();
-      const all = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      const all = snap.docs.map((d) => ({
+        id: d.id,
+        phone: d.data().phone || d.id,
+        ...d.data()
+      }));
       return all.filter((c) => c.status !== "deleted");
     } catch (err) {
       logger.warn("[FirestoreConversationRepo] Fallback to In-Memory for findAll", { error: err.message });
@@ -415,9 +419,17 @@ var FirestoreConversationRepository = class {
   async findTrash(tenantId) {
     try {
       const deletedSnap = await this.db.collection(`tenants/${tenantId}/deleted_chats`).get();
-      const archived = deletedSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      const archived = deletedSnap.docs.map((d) => ({
+        id: d.id,
+        phone: d.data().phone || d.id,
+        ...d.data()
+      }));
       const legacySnap = await this.db.collection(`tenants/${tenantId}/chats`).where("status", "==", "deleted").get();
-      const legacy = legacySnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      const legacy = legacySnap.docs.map((d) => ({
+        id: d.id,
+        phone: d.data().phone || d.id,
+        ...d.data()
+      }));
       const combinedMap = /* @__PURE__ */ new Map();
       archived.forEach((c) => combinedMap.set(c.phone || c.id, c));
       legacy.forEach((c) => {
