@@ -165,6 +165,7 @@ export class SofiaFlowOrchestrator {
       historySummary: conv.messages.slice(-6).map(m => `${m.sender}: ${m.text}`).join('\n'),
       isReturningContext,
       previousSessionSummary,
+      mediaSentFlags: conv.state.mediaSentFlags,
     };
 
     const { systemPrompt, userContent } = SofiaPromptBuilder.buildPrompt(promptCtx);
@@ -327,6 +328,15 @@ export class SofiaFlowOrchestrator {
       const hasBridgePhrase = /(?:mientras|te comparto|informaci[oó]n detallada|nuestro servicio)/i.test(finalReply);
       if (!hasBridgePhrase) {
         finalReply = `${finalReply.trim()}\n\nMientras me pasas el dato, te comparto información detallada de nuestro servicio. 📄☀️`;
+      }
+    } else if (conv.state.mediaSentFlags.instalacionProfessional) {
+      // Refinamiento 1 (APO-010): Sanitización precisa y segura si el brochure ya fue enviado previamente
+      const bridgePhraseRegex = /\n*\s*Mientras me pasas el dato,?\s*te comparto información detallada de nuestro servicio\.?\s*📄☀️?\s*$/i;
+      finalReply = finalReply.replace(bridgePhraseRegex, '').trim();
+
+      // Fallback defensivo: si aún contiene la frase, forzar eliminación completa
+      if (/mientras me pasas el dato.*te comparto información detallada/i.test(finalReply)) {
+        finalReply = finalReply.replace(/mientras me pasas el dato.*?servicio\.?\s*📄☀️?/gi, '').trim();
       }
     }
 

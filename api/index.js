@@ -707,11 +707,18 @@ REGLAS ESENCIALES DE INTERACCI\xD3N Y CERO ALUCINACI\xD3N:
    - Al solicitar el monto de recibo de luz en Paso 2:
      Pregunta amablemente al usuario si puede indicarte el monto y frecuencia de su recibo de luz, o bien si tiene a la mano su recibo CFE para compartir fotos (anverso y reverso) y extraer su consumo exacto.
      Ejemplo ideal: "\xBFPodr\xEDas indicarme el monto de tu recibo de luz y si es bimestral o mensual? O si tienes tu recibo a la mano, puedes compartirme fotos (anverso y reverso) para calcularlo con total exactitud. Mientras me pasas el dato, te comparto informaci\xF3n detallada de nuestro servicio. \u{1F4C4}\u2600\uFE0F"
-   - Agrega OBLIGATORIAMENTE al final de tu mensaje la frase amable de cortes\xEDa:
+   - Si <instalacion_brochure_sent>false</instalacion_brochure_sent>:
+     Agrega al final de tu mensaje la frase amable de cortes\xEDa anunciando el env\xEDo del brochure:
      "Mientras me pasas el dato, te comparto informaci\xF3n detallada de nuestro servicio. \u{1F4C4}\u2600\uFE0F"
-   - Si el usuario menciona que compartir\xE1 o ya comparti\xF3 fotos, acusa recibo amablemente.
-   - Establece obligatoriamente en tu respuesta JSON:
+     Establece obligatoriamente en tu respuesta JSON:
      "media_to_send": "INSTALACION_PROFESIONAL"
+     "next_step": 2
+   - Si <instalacion_brochure_sent>true</instalacion_brochure_sent>:
+     TERMINANTEMENTE PROHIBIDO volver a incluir la frase "Mientras me pasas el dato, te comparto informaci\xF3n detallada de nuestro servicio" o prometer enviar el brochure de nuevo. El brochure YA FUE ENTREGADO al usuario en el chat.
+     Si el usuario aclara que no tiene fotos del recibo (ej. "no tengo fotos de mi recibo"):
+     Responde con empat\xEDa y comprensi\xF3n, y preg\xFAntale amablemente si recuerda el monto aproximado que paga en pesos al mes o bimestre, o si prefiere agendar una visita t\xE9cnica gratuita para que nuestros ingenieros tomen la lectura in situ.
+     Establece obligatoriamente en tu respuesta JSON:
+     "media_to_send": null
      "next_step": 2
 
 9. COMPLETITUD T\xC9CNICA EN PASO 3 (TECHO Y SOMBRAS):
@@ -750,6 +757,15 @@ REGLAS ESENCIALES DE INTERACCI\xD3N Y CERO ALUCINACI\xD3N:
 
        Si el usuario indica que no le interesa el financiamiento o prefiere de contado ("Prefiero de contado", "No gracias"):
        Establece "financing_consent_given": false, "media_to_send": null, respeta su decisi\xF3n con elegancia y avanza hacia la Visita T\xE9cnica Gratuita (Paso 6).
+
+   - REGLA DE PARIDAD PARA BROCHURE DE FINANCIAMIENTO (Refinamiento 2):
+     Si <financing_brochure_sent>true</financing_brochure_sent>:
+     TERMINANTEMENTE PROHIBIDO volver a prometer enviar el brochure de financiamiento. El brochure ya fue entregado. Si el usuario pregunta por requisitos o planes, responde: "Los requisitos completos y beneficios est\xE1n en el brochure que te compart\xED anteriormente en este chat. \xBFTienes alguna duda espec\xEDfica sobre ellos o prefieres avanzar con la visita t\xE9cnica gratuita?"
+
+11. MANEJO ELEGANTE DE RE-SOLICITUDES DE BROCHURES (Refinamiento 3 - U-First):
+   - Si el usuario solicita expl\xEDcitamente que le reenv\xEDes un brochure que ya fue enviado (<instalacion_brochure_sent>true</instalacion_brochure_sent> o <financing_brochure_sent>true</financing_brochure_sent>), responde con calidez:
+     "El brochure ya est\xE1 en nuestro chat, justo arriba de este mensaje. \xBFTe gustar\xEDa que te ayude con alguna duda espec\xEDfica sobre la informaci\xF3n que contiene? \u{1F60A}"
+     NO reenv\xEDes la imagen ("media_to_send": null).
 
 ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
 {
@@ -798,6 +814,8 @@ ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
     <shadows_assessed>${Boolean(ctx.extractedData?.shadowsAssessed)}</shadows_assessed>
     <has_shade>${ctx.extractedData?.hasShade !== void 0 ? ctx.extractedData.hasShade : "desconocido"}</has_shade>
     <equivalence_already_stated>${Boolean(ctx.extractedData?.equivalenceStated)}</equivalence_already_stated>
+    <instalacion_brochure_sent>${Boolean(ctx.mediaSentFlags?.instalacionProfessional)}</instalacion_brochure_sent>
+    <financing_brochure_sent>${Boolean(ctx.mediaSentFlags?.financiamiento)}</financing_brochure_sent>
     <bot_disabled>${ctx.botDisabled}</bot_disabled>
     <data_collected>${JSON.stringify(ctx.extractedData)}</data_collected>
   </current_state>
@@ -1556,7 +1574,8 @@ var SofiaFlowOrchestrator = class {
       latestUserMessage: messageText,
       historySummary: conv.messages.slice(-6).map((m) => `${m.sender}: ${m.text}`).join("\n"),
       isReturningContext,
-      previousSessionSummary
+      previousSessionSummary,
+      mediaSentFlags: conv.state.mediaSentFlags
     };
     const { systemPrompt, userContent } = SofiaPromptBuilder.buildPrompt(promptCtx);
     const rawLlmOutput = await this.llmProvider.complete(
@@ -1682,6 +1701,12 @@ ${cleanUserMsg}` : pdfResult.textSummary;
         finalReply = `${finalReply.trim()}
 
 Mientras me pasas el dato, te comparto informaci\xF3n detallada de nuestro servicio. \u{1F4C4}\u2600\uFE0F`;
+      }
+    } else if (conv.state.mediaSentFlags.instalacionProfessional) {
+      const bridgePhraseRegex = /\n*\s*Mientras me pasas el dato,?\s*te comparto información detallada de nuestro servicio\.?\s*📄☀️?\s*$/i;
+      finalReply = finalReply.replace(bridgePhraseRegex, "").trim();
+      if (/mientras me pasas el dato.*te comparto información detallada/i.test(finalReply)) {
+        finalReply = finalReply.replace(/mientras me pasas el dato.*?servicio\.?\s*📄☀️?/gi, "").trim();
       }
     }
     const wasFinancingRequested = conv.state.financingConsentRequested;
