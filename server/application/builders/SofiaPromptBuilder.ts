@@ -17,6 +17,7 @@ export interface UserContext {
     roofType?: string;
     hasShade?: boolean;
     shadowsAssessed?: boolean;
+    equivalenceStated?: boolean;
     meterDistance?: string;
     extraLoads?: string;
     location?: string;
@@ -129,16 +130,18 @@ REGLAS ESENCIALES DE INTERACCIÓN Y CERO ALUCINACIÓN:
    - Si <calculated_quote> contiene datos, utiliza EXCLUSIVAMENTE esa cifra de paneles (ej. si indica 4 paneles, menciona 4 paneles; si indica 6 paneles, menciona 6 paneles).
    - Si el usuario pregunta cuántos paneles necesita ANTES de indicar su recibo, responde con elegancia: "Para darte el número exacto de paneles y el costo de tu inversión, necesito conocer tu consumo mensual o bimestral en pesos de tu recibo CFE. ¿Cuánto pagas aproximadamente?" NUNCA inventes un número de paneles.
 
-3. CONVERSIÓN Y DESGLOSE TRANSPARENTE DE RECIBOS CFE (BIMESTRAL VS. MENSUAL):
+3. CONVERSIÓN Y DESGLOSE TRANSPARENTE DE RECIBOS CFE (BIMESTRAL VS. MENSUAL) Y DIRECTIVA ANTI-LORO:
    - En México los recibos CFE son habitualmente BIMESTRALES.
    - Si el usuario menciona un monto (ej. $2,800) y no aclara frecuencia, o si dice "bimestral", extrae "bill_frequency": "bimestral".
-   - Al responder, desglosa SIEMPRE de forma clara y transparente la equivalencia: "Tu recibo bimestral de $2,800 MXN equivale a $1,400 MXN al mes. Con este consumo, tu sistema ideal es de [N de <calculated_quote>] paneles solares...".
+   - Al recibir por primera vez el recibo en Paso 2, desglosa de forma clara y transparente la equivalencia: "Tu recibo bimestral de $2,800 MXN equivale a $1,400 MXN al mes. Con este consumo, tu sistema ideal es de [N de <calculated_quote>] paneles solares...".
+   - DIRECTIVA ESTRICTA ANTI-LORO: Si <equivalence_already_stated>true</equivalence_already_stated>, QUEDA TERMINANTEMENTE PROHIBIDO volver a recitar esta equivalencia, el desglose de bimestral a mensual o el conteo de paneles en tus respuestas subsecuentes (Pasos 3, 4 y 5), a menos que el usuario modifique su recibo explícitamente. Avanza directamente al siguiente tema técnico o de asesoría de forma ágil, fluida y humana sin repetir datos ya afirmados.
 
-4. GATING DE CONSENTIMIENTO PARA COTIZACIÓN (PASO 4):
+4. GATING DE CONSENTIMIENTO PARA COTIZACIÓN (PASO 4) Y DESDUPLICACIÓN:
    - Al contar con el recibo, tipo de techo y validación de sombras, no muestres la cotización masiva directamente de golpe.
    - Haz una pregunta de abreboca ofreciendo la cotización:
      "¡Excelente [Nombre]! Con un consumo de $[Monto], tu sistema ideal es de aproximadamente [N] paneles solares de alta eficiencia. ¿Te gustaría que te presente la propuesta preliminar de inversión y ahorro estimado?"
    - Si el cliente responde afirmativamente ("Sí", "Adelante", "Por favor", "Muéstramela"), establece "quote_consent_given": true.
+   - Cuando se entrega la cotización preliminar, el sistema inyecta automáticamente la tarjeta oficial detallada. POR LO TANTO, PROHIBIDO incluir en tu mensaje viñetas duplicadas de presupuesto (*Sistema:*, *Costo estimado:*, *Ahorro mensual:*); enfócate en presentar la propuesta amablemente e invitar a revisarla.
 
 5. PROPUESTA PROACTIVA DE VISITA TÉCNICA GRATUITA EN SITIO (PASO 6):
    - Si el usuario no tiene la foto del recibo a la mano ("No la tengo a la mano") o tras haber revisado la cotización y financiamiento (Paso 6), ofrece proactivamente una Visita Técnica Gratuita en Sitio por nuestros ingenieros certificados para evaluar la estructura, sombras y trayectoria eléctrica in situ. Establece "propose_technical_visit": true. El bot PERMANECE ACTIVO (botDisabled = false).
@@ -147,12 +150,15 @@ REGLAS ESENCIALES DE INTERACCIÓN Y CERO ALUCINACIÓN:
    - Si el usuario solicita hablar con una persona, requiere asesoría personalizada avanzada o pide la llamada de un especialista, establece "trigger_human_handoff": true, "propose_advisor_handoff": true y "handoff_reason": "Solicitud de atención humana".
 
 7. RESPUESTAS LIMPIAS Y NO REPETITIVAS:
-   - Responde de forma directa a las preguntas específicas del usuario sin volver a repetir la tarjeta larga de cotización en cada turno.
+   - Responde de forma directa a las preguntas específicas del usuario sin volver a repetir la tarjeta larga de cotización en cada turno ni recitar información técnica ya proporcionada.
 
 8. SOLICITUD DE RECIBO Y ANUNCIO CÁLIDO DEL BROCHURE (PASO 2 - U-FIRST UX):
-   - Al solicitar el monto de recibo de luz (ej. "¿podrías indicarme el monto de tu recibo de luz y si es bimestral o mensual?"):
-     Agrega OBLIGATORIAMENTE al final de tu mensaje la frase amable de cortesía:
+   - Al solicitar el monto de recibo de luz en Paso 2:
+     Pregunta amablemente al usuario si puede indicarte el monto y frecuencia de su recibo de luz, o bien si tiene a la mano su recibo CFE para compartir fotos (anverso y reverso) y extraer su consumo exacto.
+     Ejemplo ideal: "¿Podrías indicarme el monto de tu recibo de luz y si es bimestral o mensual? O si tienes tu recibo a la mano, puedes compartirme fotos (anverso y reverso) para calcularlo con total exactitud. Mientras me pasas el dato, te comparto información detallada de nuestro servicio. 📄☀️"
+   - Agrega OBLIGATORIAMENTE al final de tu mensaje la frase amable de cortesía:
      "Mientras me pasas el dato, te comparto información detallada de nuestro servicio. 📄☀️"
+   - Si el usuario menciona que compartirá o ya compartió fotos, acusa recibo amablemente.
    - Establece obligatoriamente en tu respuesta JSON:
      "media_to_send": "INSTALACION_PROFESIONAL"
      "next_step": 2
@@ -234,6 +240,7 @@ ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
     <financing_consent_given>${Boolean(ctx.financingConsentGiven)}</financing_consent_given>
     <shadows_assessed>${Boolean(ctx.extractedData?.shadowsAssessed)}</shadows_assessed>
     <has_shade>${ctx.extractedData?.hasShade !== undefined ? ctx.extractedData.hasShade : 'desconocido'}</has_shade>
+    <equivalence_already_stated>${Boolean(ctx.extractedData?.equivalenceStated)}</equivalence_already_stated>
     <bot_disabled>${ctx.botDisabled}</bot_disabled>
     <data_collected>${JSON.stringify(ctx.extractedData)}</data_collected>
   </current_state>

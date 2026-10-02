@@ -29,6 +29,7 @@ export interface ConversationState {
   hasShade?: boolean;
   shadows_assessed?: boolean;
   shadowsAssessed?: boolean;
+  equivalenceStated?: boolean;
   voltage?: string;
   floors?: number;
   quoteConsentRequested?: boolean;

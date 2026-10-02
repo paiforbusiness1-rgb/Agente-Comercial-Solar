@@ -224,6 +224,7 @@ v2Router.get('/whatsapp-webhook', (req: Request, res: Response) => {
 
 v2Router.post('/whatsapp-webhook', async (req: Request, res: Response) => {
   let phone = '', text = '', name = 'Cliente';
+  let isImage = false;
   const body = req.body;
 
   try {
@@ -236,7 +237,12 @@ v2Router.post('/whatsapp-webhook', async (req: Request, res: Response) => {
       if (val.messages?.[0]) {
         const msg = val.messages[0];
         phone = msg.from;
-        text = msg.text?.body || msg.button?.text || msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || '';
+        if (msg.type === 'image' || msg.image) {
+          isImage = true;
+          text = msg.image?.caption || msg.text?.body || '';
+        } else {
+          text = msg.text?.body || msg.button?.text || msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || '';
+        }
         name = val.contacts?.[0]?.profile?.name || 'Cliente WhatsApp';
       } else {
         if (val.statuses?.[0]) {
@@ -254,6 +260,9 @@ v2Router.post('/whatsapp-webhook', async (req: Request, res: Response) => {
       }
       if (messaging.message) {
         phone = messaging.sender?.id || '';
+        if (messaging.message.attachments?.some((att: any) => att.type === 'image')) {
+          isImage = true;
+        }
         text = messaging.message.text || '';
         name = 'Cliente Messenger';
       } else if (messaging.postback) {
@@ -265,26 +274,32 @@ v2Router.post('/whatsapp-webhook', async (req: Request, res: Response) => {
       }
     }
     // 3. Twilio payload
-    else if (body.From && body.Body) {
+    else if (body.From && (body.Body || body.NumMedia)) {
       phone = body.From.replace('whatsapp:', '');
-      text = body.Body;
+      text = body.Body || '';
+      if (body.NumMedia && parseInt(body.NumMedia, 10) > 0) {
+        isImage = true;
+      }
       name = body.ProfileName || 'Cliente Twilio';
     }
     // 4. Playground / Simulator payload
-    else if (body.phone && body.text) {
+    else if (body.phone && (body.text || body.type === 'image' || body.isImage)) {
       phone = body.phone;
-      text = body.text;
+      text = body.text || '';
+      if (body.type === 'image' || body.isImage) {
+        isImage = true;
+      }
       name = body.name || 'Cliente Simulado';
     }
 
-    if (!phone || !text) {
-      logger.warn('[v2 Webhook] Missing phone or text, skipping');
+    if (!phone || (!text && !isImage)) {
+      logger.warn('[v2 Webhook] Missing phone or text/image, skipping');
       return res.status(200).json({ status: 'received' });
     }
 
     // Run use case BEFORE responding — ensures Vercel doesn't freeze the Lambda
     const useCase = buildReceiveMessageUseCase();
-    await useCase.execute({ phone, text, name });
+    await useCase.execute({ phone, text, name, isImage });
   } catch (err: any) {
     logger.error('[v2 Webhook] Unhandled error', { error: err.message, stack: err.stack });
   }

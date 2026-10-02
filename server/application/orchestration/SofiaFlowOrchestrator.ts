@@ -13,7 +13,7 @@ import { IQuoteEngine, QuoteResult } from '../../interfaces/IQuoteEngine.js';
 import { ILLMProvider } from '../../interfaces/ILLMProvider.js';
 import { SofiaPromptBuilder, SofiaLlmResponse } from '../builders/SofiaPromptBuilder.js';
 import { QuotePdfService } from '../../infrastructure/services/QuotePdfService.js';
-import { BillNormalizerService } from '../../domain/services/BillNormalizerService.js';
+import { BillNormalizerService, NormalizationResult } from '../../domain/services/BillNormalizerService.js';
 import { AgentNotificationService, ProspectData } from '../../infrastructure/services/AgentNotificationService.js';
 import { AgentRepository } from '../../infrastructure/persistence/AgentRepository.js';
 import { AppConfig } from '../../shared/config/AppConfig.js';
@@ -102,17 +102,22 @@ export class SofiaFlowOrchestrator {
     const currentStepInt = this.phaseToStepInt(conv.state.phase);
 
     // 2. Pre-Parse User Message for Bill Amount & Frequency (Single-Pass Zero-Latency)
-    const preParsedBill = BillNormalizerService.normalize({
-      rawAmount: conv.state.monthlyBill ? (conv.state.billFrequency === 'bimestral' ? (conv.state.bimestralBill || conv.state.monthlyBill * 2) : conv.state.monthlyBill) : null,
-      rawFrequency: conv.state.billFrequency,
-      messageText,
-    });
+    const userMentionedBill = BillNormalizerService.preParseUserText(messageText);
+    let preParsedBill: NormalizationResult | null = null;
+    if (userMentionedBill) {
+      preParsedBill = BillNormalizerService.normalize({
+        rawAmount: userMentionedBill.amount,
+        rawFrequency: userMentionedBill.frequency || conv.state.billFrequency,
+        messageText,
+      });
 
-    if (preParsedBill) {
-      conv.state.monthlyBill = preParsedBill.monthlyBill;
-      conv.state.bimestralBill = preParsedBill.bimestralBill;
-      conv.state.billFrequency = preParsedBill.frequency;
-      (conv as any).montoRecibo = preParsedBill.formattedSummary;
+      if (preParsedBill) {
+        conv.state.monthlyBill = preParsedBill.monthlyBill;
+        conv.state.bimestralBill = preParsedBill.bimestralBill;
+        conv.state.billFrequency = preParsedBill.frequency;
+        (conv as any).montoRecibo = preParsedBill.formattedSummary;
+        conv.state.equivalenceStated = true;
+      }
     }
 
     // Pre-Calculate Quote as Single Source of Truth (Prevent LLM Text Hallucinations)
@@ -137,11 +142,14 @@ export class SofiaFlowOrchestrator {
       userName: conv.nombre,
       currentStep: currentStepInt,
       extractedData: {
-        billAmount: conv.state.monthlyBill,
+        billAmount: conv.state.billFrequency === 'bimestral'
+          ? (conv.state.bimestralBill || (conv.state.monthlyBill ? conv.state.monthlyBill * 2 : undefined))
+          : conv.state.monthlyBill,
         billFrequency: conv.state.billFrequency,
         roofType: conv.state.roofType,
         hasShade: conv.state.hasShade,
         shadowsAssessed: conv.state.shadowsAssessed,
+        equivalenceStated: conv.state.equivalenceStated,
         meterDistance: (conv.state as any).meterDistance,
         extraLoads: (conv.state as any).extraLoads,
         location: (conv.state as any).location,
@@ -195,11 +203,17 @@ export class SofiaFlowOrchestrator {
         });
 
         if (normalized) {
-          const billChanged = conv.state.monthlyBill !== normalized.monthlyBill;
-          conv.state.monthlyBill = normalized.monthlyBill;
-          conv.state.bimestralBill = normalized.bimestralBill;
-          conv.state.billFrequency = normalized.frequency;
-          (conv as any).montoRecibo = normalized.formattedSummary;
+          // Refinamiento 2: billChanged SOLO es true si el usuario aportó un dato numérico nuevo en messageText
+          const billChanged = userMentionedBill !== null && conv.state.monthlyBill !== normalized.monthlyBill;
+
+          // Solo actualizar montos si el usuario aportó un dato nuevo O si no teníamos montos previos
+          if (userMentionedBill !== null || !conv.state.monthlyBill) {
+            conv.state.monthlyBill = normalized.monthlyBill;
+            conv.state.bimestralBill = normalized.bimestralBill;
+            conv.state.billFrequency = normalized.frequency;
+            (conv as any).montoRecibo = normalized.formattedSummary;
+            conv.state.equivalenceStated = true;
+          }
 
           // Dynamic Re-Quotation: If user corrected bill/frequency, clear QUOTE_SENT flag
           if (billChanged && conv.state.completedSteps.includes('QUOTE_SENT')) {
@@ -290,7 +304,13 @@ export class SofiaFlowOrchestrator {
       };
 
       const pdfResult = await QuotePdfService.generateQuote(quoteDto);
-      finalReply = `${pdfResult.textSummary}\n\n${parsed.message_to_user}`;
+      
+      // Desduplicación en Turno 4 (Anti-Redundancia): eliminar viñetas que repliquen la tarjeta oficial
+      let cleanUserMsg = parsed.message_to_user
+        .replace(/(?:[-*•]\s*)?\*?(?:Sistema|Costo estimado|Inversión estimada|Inversion estimada|Ahorro mensual|Ahorro anual|Retorno de inversión|Retorno de inversion)\*?:?.*(?:\r?\n|$)/gi, '')
+        .trim();
+
+      finalReply = cleanUserMsg ? `${pdfResult.textSummary}\n\n${cleanUserMsg}` : pdfResult.textSummary;
       conv.state.completedSteps.push('QUOTE_SENT');
     }
 

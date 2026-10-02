@@ -576,16 +576,28 @@ var ReceiveMessageUseCase = class {
   async execute(input) {
     const tenantId = input.tenantId || AppConfig.tenant.defaultId;
     const phone = input.phone.replace(/[^\d]/g, "");
+    const text = input.text || "";
     logger.info("[ReceiveMessageUseCase] Message received", {
       phone,
       tenantId,
-      text: input.text.substring(0, 60)
+      text: text.substring(0, 60),
+      isImage: Boolean(input.isImage)
     });
+    if (input.isImage && (!text || !text.trim())) {
+      const fallbackReply = "He recibido tu imagen. Para asegurarme de leer el monto con total precisi\xF3n, \xBFpodr\xEDas confirmarme por favor el monto total en pesos que aparece en el recibo? \xA1Gracias!";
+      const conv = await this.convRepo.findByPhone(tenantId, phone);
+      conv.messages.push({ sender: "user", text: "\u{1F4F7} [Imagen de recibo adjuntada]", timestamp: (/* @__PURE__ */ new Date()).toISOString() });
+      conv.messages.push({ sender: "bot", text: fallbackReply, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
+      conv.lastMessageAt = (/* @__PURE__ */ new Date()).toISOString();
+      await this.convRepo.save(conv);
+      await this.sendWhatsApp(phone, fallbackReply);
+      return { reply: fallbackReply, leadGenerated: false };
+    }
     const result = await this.orchestrator.processMessage({
       tenantId,
       phone,
       userName: input.name,
-      messageText: input.text
+      messageText: text
     });
     if (result.replyText) {
       await this.sendWhatsApp(phone, result.replyText);
@@ -660,16 +672,18 @@ REGLAS ESENCIALES DE INTERACCI\xD3N Y CERO ALUCINACI\xD3N:
    - Si <calculated_quote> contiene datos, utiliza EXCLUSIVAMENTE esa cifra de paneles (ej. si indica 4 paneles, menciona 4 paneles; si indica 6 paneles, menciona 6 paneles).
    - Si el usuario pregunta cu\xE1ntos paneles necesita ANTES de indicar su recibo, responde con elegancia: "Para darte el n\xFAmero exacto de paneles y el costo de tu inversi\xF3n, necesito conocer tu consumo mensual o bimestral en pesos de tu recibo CFE. \xBFCu\xE1nto pagas aproximadamente?" NUNCA inventes un n\xFAmero de paneles.
 
-3. CONVERSI\xD3N Y DESGLOSE TRANSPARENTE DE RECIBOS CFE (BIMESTRAL VS. MENSUAL):
+3. CONVERSI\xD3N Y DESGLOSE TRANSPARENTE DE RECIBOS CFE (BIMESTRAL VS. MENSUAL) Y DIRECTIVA ANTI-LORO:
    - En M\xE9xico los recibos CFE son habitualmente BIMESTRALES.
    - Si el usuario menciona un monto (ej. $2,800) y no aclara frecuencia, o si dice "bimestral", extrae "bill_frequency": "bimestral".
-   - Al responder, desglosa SIEMPRE de forma clara y transparente la equivalencia: "Tu recibo bimestral de $2,800 MXN equivale a $1,400 MXN al mes. Con este consumo, tu sistema ideal es de [N de <calculated_quote>] paneles solares...".
+   - Al recibir por primera vez el recibo en Paso 2, desglosa de forma clara y transparente la equivalencia: "Tu recibo bimestral de $2,800 MXN equivale a $1,400 MXN al mes. Con este consumo, tu sistema ideal es de [N de <calculated_quote>] paneles solares...".
+   - DIRECTIVA ESTRICTA ANTI-LORO: Si <equivalence_already_stated>true</equivalence_already_stated>, QUEDA TERMINANTEMENTE PROHIBIDO volver a recitar esta equivalencia, el desglose de bimestral a mensual o el conteo de paneles en tus respuestas subsecuentes (Pasos 3, 4 y 5), a menos que el usuario modifique su recibo expl\xEDcitamente. Avanza directamente al siguiente tema t\xE9cnico o de asesor\xEDa de forma \xE1gil, fluida y humana sin repetir datos ya afirmados.
 
-4. GATING DE CONSENTIMIENTO PARA COTIZACI\xD3N (PASO 4):
+4. GATING DE CONSENTIMIENTO PARA COTIZACI\xD3N (PASO 4) Y DESDUPLICACI\xD3N:
    - Al contar con el recibo, tipo de techo y validaci\xF3n de sombras, no muestres la cotizaci\xF3n masiva directamente de golpe.
    - Haz una pregunta de abreboca ofreciendo la cotizaci\xF3n:
      "\xA1Excelente [Nombre]! Con un consumo de $[Monto], tu sistema ideal es de aproximadamente [N] paneles solares de alta eficiencia. \xBFTe gustar\xEDa que te presente la propuesta preliminar de inversi\xF3n y ahorro estimado?"
    - Si el cliente responde afirmativamente ("S\xED", "Adelante", "Por favor", "Mu\xE9stramela"), establece "quote_consent_given": true.
+   - Cuando se entrega la cotizaci\xF3n preliminar, el sistema inyecta autom\xE1ticamente la tarjeta oficial detallada. POR LO TANTO, PROHIBIDO incluir en tu mensaje vi\xF1etas duplicadas de presupuesto (*Sistema:*, *Costo estimado:*, *Ahorro mensual:*); enf\xF3cate en presentar la propuesta amablemente e invitar a revisarla.
 
 5. PROPUESTA PROACTIVA DE VISITA T\xC9CNICA GRATUITA EN SITIO (PASO 6):
    - Si el usuario no tiene la foto del recibo a la mano ("No la tengo a la mano") o tras haber revisado la cotizaci\xF3n y financiamiento (Paso 6), ofrece proactivamente una Visita T\xE9cnica Gratuita en Sitio por nuestros ingenieros certificados para evaluar la estructura, sombras y trayectoria el\xE9ctrica in situ. Establece "propose_technical_visit": true. El bot PERMANECE ACTIVO (botDisabled = false).
@@ -678,12 +692,15 @@ REGLAS ESENCIALES DE INTERACCI\xD3N Y CERO ALUCINACI\xD3N:
    - Si el usuario solicita hablar con una persona, requiere asesor\xEDa personalizada avanzada o pide la llamada de un especialista, establece "trigger_human_handoff": true, "propose_advisor_handoff": true y "handoff_reason": "Solicitud de atenci\xF3n humana".
 
 7. RESPUESTAS LIMPIAS Y NO REPETITIVAS:
-   - Responde de forma directa a las preguntas espec\xEDficas del usuario sin volver a repetir la tarjeta larga de cotizaci\xF3n en cada turno.
+   - Responde de forma directa a las preguntas espec\xEDficas del usuario sin volver a repetir la tarjeta larga de cotizaci\xF3n en cada turno ni recitar informaci\xF3n t\xE9cnica ya proporcionada.
 
 8. SOLICITUD DE RECIBO Y ANUNCIO C\xC1LIDO DEL BROCHURE (PASO 2 - U-FIRST UX):
-   - Al solicitar el monto de recibo de luz (ej. "\xBFpodr\xEDas indicarme el monto de tu recibo de luz y si es bimestral o mensual?"):
-     Agrega OBLIGATORIAMENTE al final de tu mensaje la frase amable de cortes\xEDa:
+   - Al solicitar el monto de recibo de luz en Paso 2:
+     Pregunta amablemente al usuario si puede indicarte el monto y frecuencia de su recibo de luz, o bien si tiene a la mano su recibo CFE para compartir fotos (anverso y reverso) y extraer su consumo exacto.
+     Ejemplo ideal: "\xBFPodr\xEDas indicarme el monto de tu recibo de luz y si es bimestral o mensual? O si tienes tu recibo a la mano, puedes compartirme fotos (anverso y reverso) para calcularlo con total exactitud. Mientras me pasas el dato, te comparto informaci\xF3n detallada de nuestro servicio. \u{1F4C4}\u2600\uFE0F"
+   - Agrega OBLIGATORIAMENTE al final de tu mensaje la frase amable de cortes\xEDa:
      "Mientras me pasas el dato, te comparto informaci\xF3n detallada de nuestro servicio. \u{1F4C4}\u2600\uFE0F"
+   - Si el usuario menciona que compartir\xE1 o ya comparti\xF3 fotos, acusa recibo amablemente.
    - Establece obligatoriamente en tu respuesta JSON:
      "media_to_send": "INSTALACION_PROFESIONAL"
      "next_step": 2
@@ -763,6 +780,7 @@ ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
     <financing_consent_given>${Boolean(ctx.financingConsentGiven)}</financing_consent_given>
     <shadows_assessed>${Boolean(ctx.extractedData?.shadowsAssessed)}</shadows_assessed>
     <has_shade>${ctx.extractedData?.hasShade !== void 0 ? ctx.extractedData.hasShade : "desconocido"}</has_shade>
+    <equivalence_already_stated>${Boolean(ctx.extractedData?.equivalenceStated)}</equivalence_already_stated>
     <bot_disabled>${ctx.botDisabled}</bot_disabled>
     <data_collected>${JSON.stringify(ctx.extractedData)}</data_collected>
   </current_state>
@@ -1467,16 +1485,21 @@ var SofiaFlowOrchestrator = class {
       previousSessionSummary = parts.length > 0 ? `Conversaci\xF3n previa: ${parts.join(", ")}.` : "El cliente ha interactuado previamente con Sof\xEDa.";
     }
     const currentStepInt = this.phaseToStepInt(conv.state.phase);
-    const preParsedBill = BillNormalizerService.normalize({
-      rawAmount: conv.state.monthlyBill ? conv.state.billFrequency === "bimestral" ? conv.state.bimestralBill || conv.state.monthlyBill * 2 : conv.state.monthlyBill : null,
-      rawFrequency: conv.state.billFrequency,
-      messageText
-    });
-    if (preParsedBill) {
-      conv.state.monthlyBill = preParsedBill.monthlyBill;
-      conv.state.bimestralBill = preParsedBill.bimestralBill;
-      conv.state.billFrequency = preParsedBill.frequency;
-      conv.montoRecibo = preParsedBill.formattedSummary;
+    const userMentionedBill = BillNormalizerService.preParseUserText(messageText);
+    let preParsedBill = null;
+    if (userMentionedBill) {
+      preParsedBill = BillNormalizerService.normalize({
+        rawAmount: userMentionedBill.amount,
+        rawFrequency: userMentionedBill.frequency || conv.state.billFrequency,
+        messageText
+      });
+      if (preParsedBill) {
+        conv.state.monthlyBill = preParsedBill.monthlyBill;
+        conv.state.bimestralBill = preParsedBill.bimestralBill;
+        conv.state.billFrequency = preParsedBill.frequency;
+        conv.montoRecibo = preParsedBill.formattedSummary;
+        conv.state.equivalenceStated = true;
+      }
     }
     let calculatedQuoteInfo = null;
     let preCalcResult = null;
@@ -1496,11 +1519,12 @@ var SofiaFlowOrchestrator = class {
       userName: conv.nombre,
       currentStep: currentStepInt,
       extractedData: {
-        billAmount: conv.state.monthlyBill,
+        billAmount: conv.state.billFrequency === "bimestral" ? conv.state.bimestralBill || (conv.state.monthlyBill ? conv.state.monthlyBill * 2 : void 0) : conv.state.monthlyBill,
         billFrequency: conv.state.billFrequency,
         roofType: conv.state.roofType,
         hasShade: conv.state.hasShade,
         shadowsAssessed: conv.state.shadowsAssessed,
+        equivalenceStated: conv.state.equivalenceStated,
         meterDistance: conv.state.meterDistance,
         extraLoads: conv.state.extraLoads,
         location: conv.state.location,
@@ -1543,11 +1567,14 @@ var SofiaFlowOrchestrator = class {
           messageText
         });
         if (normalized) {
-          const billChanged = conv.state.monthlyBill !== normalized.monthlyBill;
-          conv.state.monthlyBill = normalized.monthlyBill;
-          conv.state.bimestralBill = normalized.bimestralBill;
-          conv.state.billFrequency = normalized.frequency;
-          conv.montoRecibo = normalized.formattedSummary;
+          const billChanged = userMentionedBill !== null && conv.state.monthlyBill !== normalized.monthlyBill;
+          if (userMentionedBill !== null || !conv.state.monthlyBill) {
+            conv.state.monthlyBill = normalized.monthlyBill;
+            conv.state.bimestralBill = normalized.bimestralBill;
+            conv.state.billFrequency = normalized.frequency;
+            conv.montoRecibo = normalized.formattedSummary;
+            conv.state.equivalenceStated = true;
+          }
           if (billChanged && conv.state.completedSteps.includes("QUOTE_SENT")) {
             conv.state.completedSteps = conv.state.completedSteps.filter((step) => step !== "QUOTE_SENT");
           }
@@ -1622,9 +1649,10 @@ var SofiaFlowOrchestrator = class {
         location: conv.state.location
       };
       const pdfResult = await QuotePdfService.generateQuote(quoteDto);
-      finalReply = `${pdfResult.textSummary}
+      let cleanUserMsg = parsed.message_to_user.replace(/(?:[-*•]\s*)?\*?(?:Sistema|Costo estimado|Inversión estimada|Inversion estimada|Ahorro mensual|Ahorro anual|Retorno de inversión|Retorno de inversion)\*?:?.*(?:\r?\n|$)/gi, "").trim();
+      finalReply = cleanUserMsg ? `${pdfResult.textSummary}
 
-${parsed.message_to_user}`;
+${cleanUserMsg}` : pdfResult.textSummary;
       conv.state.completedSteps.push("QUOTE_SENT");
     }
     const shouldSendInstalacion = (parsed.media_to_send === "INSTALACION_PROFESIONAL" || effectiveNextStep === 2 || effectiveNextStep === 3) && !conv.state.mediaSentFlags.instalacionProfessional;
@@ -2484,6 +2512,7 @@ v2Router.get("/whatsapp-webhook", (req, res) => {
 });
 v2Router.post("/whatsapp-webhook", async (req, res) => {
   let phone = "", text = "", name = "Cliente";
+  let isImage = false;
   const body = req.body;
   try {
     if (body.entry?.[0]?.changes?.[0]?.value) {
@@ -2493,7 +2522,12 @@ v2Router.post("/whatsapp-webhook", async (req, res) => {
       if (val.messages?.[0]) {
         const msg = val.messages[0];
         phone = msg.from;
-        text = msg.text?.body || msg.button?.text || msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || "";
+        if (msg.type === "image" || msg.image) {
+          isImage = true;
+          text = msg.image?.caption || msg.text?.body || "";
+        } else {
+          text = msg.text?.body || msg.button?.text || msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || "";
+        }
         name = val.contacts?.[0]?.profile?.name || "Cliente WhatsApp";
       } else {
         if (val.statuses?.[0]) {
@@ -2509,6 +2543,9 @@ v2Router.post("/whatsapp-webhook", async (req, res) => {
       }
       if (messaging.message) {
         phone = messaging.sender?.id || "";
+        if (messaging.message.attachments?.some((att) => att.type === "image")) {
+          isImage = true;
+        }
         text = messaging.message.text || "";
         name = "Cliente Messenger";
       } else if (messaging.postback) {
@@ -2518,21 +2555,27 @@ v2Router.post("/whatsapp-webhook", async (req, res) => {
       } else {
         return res.status(200).json({ status: "received" });
       }
-    } else if (body.From && body.Body) {
+    } else if (body.From && (body.Body || body.NumMedia)) {
       phone = body.From.replace("whatsapp:", "");
-      text = body.Body;
+      text = body.Body || "";
+      if (body.NumMedia && parseInt(body.NumMedia, 10) > 0) {
+        isImage = true;
+      }
       name = body.ProfileName || "Cliente Twilio";
-    } else if (body.phone && body.text) {
+    } else if (body.phone && (body.text || body.type === "image" || body.isImage)) {
       phone = body.phone;
-      text = body.text;
+      text = body.text || "";
+      if (body.type === "image" || body.isImage) {
+        isImage = true;
+      }
       name = body.name || "Cliente Simulado";
     }
-    if (!phone || !text) {
-      logger.warn("[v2 Webhook] Missing phone or text, skipping");
+    if (!phone || !text && !isImage) {
+      logger.warn("[v2 Webhook] Missing phone or text/image, skipping");
       return res.status(200).json({ status: "received" });
     }
     const useCase = buildReceiveMessageUseCase();
-    await useCase.execute({ phone, text, name });
+    await useCase.execute({ phone, text, name, isImage });
   } catch (err) {
     logger.error("[v2 Webhook] Unhandled error", { error: err.message, stack: err.stack });
   }
