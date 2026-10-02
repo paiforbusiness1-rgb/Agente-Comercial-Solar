@@ -10,7 +10,7 @@ import { logger } from '../../shared/logger/ConsoleLogger.js';
 
 export interface AuditLogEntry {
   id?: string;
-  eventType: 'CHAT_SOFT_DELETED' | 'CHAT_RESTORED' | 'USER_LOGIN' | 'USER_LOGOUT' | 'LEAD_STATUS_UPDATED' | 'TRASH_PURGED';
+  eventType: 'CHAT_SOFT_DELETED' | 'CHAT_RESTORED' | 'USER_LOGIN' | 'USER_LOGOUT' | 'LEAD_STATUS_UPDATED' | 'TRASH_PURGED' | 'AGENT_CREATED' | 'AGENT_UPDATED' | 'AGENT_DELETED';
   userEmail: string;
   userRole: string;
   resourceId: string;

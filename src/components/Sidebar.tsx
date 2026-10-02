@@ -1,11 +1,11 @@
 import React from 'react';
-import { MessageSquare, Users, Database, Sparkles, Server, Trash2, X, LogOut, ShieldCheck } from 'lucide-react';
+import { MessageSquare, Users, Database, Sparkles, Server, Trash2, X, LogOut, ShieldCheck, UserCog } from 'lucide-react';
 import { Chat, QualifiedLead } from '../types';
 
 interface SidebarProps {
   isDarkMode: boolean;
   activeTab: string;
-  setActiveTab: (tab: 'chats' | 'leads' | 'simulator' | 'guide' | 'copilot' | 'audit') => void;
+  setActiveTab: (tab: 'chats' | 'leads' | 'simulator' | 'guide' | 'copilot' | 'audit' | 'agents') => void;
   chats: Chat[];
   leads: QualifiedLead[];
   isFirebaseConnected: boolean;
@@ -185,6 +185,31 @@ export const Sidebar: React.FC<SidebarProps> = ({
                 : 'bg-emerald-50 text-emerald-600 border-emerald-200'
             }`}>
               ISO 27034
+            </span>
+          </button>
+
+          <button
+            onClick={() => { setActiveTab('agents'); setIsMobileMenuOpen(false); }}
+            className={`w-full flex items-center justify-between px-4 py-3 rounded-xl transition-all duration-200 text-left border cursor-pointer ${
+              activeTab === 'agents'
+                ? isDarkMode
+                  ? 'bg-amber-500/10 text-amber-500 border-amber-500/30 font-medium shadow-lg shadow-amber-950/30'
+                  : 'bg-amber-50 text-amber-600 border-amber-500/30 font-semibold shadow-md shadow-amber-100'
+                : isDarkMode
+                ? 'text-slate-400 border-transparent hover:bg-slate-600/40 hover:text-slate-100'
+                : 'text-slate-600 border-transparent hover:bg-slate-100 hover:text-slate-800'
+            }`}
+          >
+            <div className="flex items-center space-x-3">
+              <UserCog className="h-4 w-4" />
+              <span className="text-sm font-medium">Agentes</span>
+            </div>
+            <span className={`text-[9px] border px-2 py-0.5 rounded font-mono ${
+              isDarkMode
+                ? 'bg-slate-700 text-indigo-400 border-indigo-500/30'
+                : 'bg-indigo-50 text-indigo-600 border-indigo-200'
+            }`}>
+              CONFIG
             </span>
           </button>
 

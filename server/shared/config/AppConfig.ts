@@ -11,6 +11,7 @@ export const AppConfig = {
       verifyToken: process.env.WHATSAPP_VERIFY_TOKEN || 'O3_ENERGY_MEXICO_TOKEN',
       accessToken: process.env.WHATSAPP_ACCESS_TOKEN || '',
       phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID || '',
+      waAgentTemplateName: process.env.WA_AGENT_TEMPLATE_NAME || 'notificacion_nuevo_prospecto',
     };
   },
   get groq() {
@@ -42,5 +43,11 @@ export const AppConfig = {
       jwtSecret: process.env.JWT_SECRET || 'fallback-super-secret-jwt-key-minimum-32-chars-entropy-2026',
       tokenExpiresInHours: parseInt(process.env.JWT_EXPIRES_IN_HOURS || '8', 10),
     };
-  }
+  },
+  get agents() {
+    return {
+      fallbackEmail: process.env.FALLBACK_AGENT_EMAIL || 'ventas@o3energy.mx',
+      fallbackWhatsapp: process.env.FALLBACK_AGENT_WA || '',
+    };
+  },
 };

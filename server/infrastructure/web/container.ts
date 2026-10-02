@@ -156,19 +156,33 @@ function getRepos() {
   };
 }
 
+import { AgentRepository } from '../persistence/AgentRepository.js';
+
+let _db: any = null;
 let _convRepo: FirestoreConversationRepository | InMemoryConversationRepository | undefined;
 let _leadRepo: FirestoreLeadRepository | InMemoryLeadRepository | undefined;
+let _agentRepo: AgentRepository | undefined;
 
 export function initRepositories(db: any | null) {
+  _db = db;
   if (db) {
     logger.info('[DI] initRepositories: Using Firestore repositories (multi-tenant)');
     _convRepo = new FirestoreConversationRepository(db);
     _leadRepo = new FirestoreLeadRepository(db);
+    _agentRepo = new AgentRepository(db);
   } else {
     logger.warn('[DI] initRepositories: Firestore not available — using InMemory repositories');
     _convRepo = new InMemoryConversationRepository();
     _leadRepo = new InMemoryLeadRepository();
+    _agentRepo = new AgentRepository(null);
   }
+}
+
+export function getAgentRepo(): AgentRepository {
+  if (!_agentRepo) {
+    _agentRepo = new AgentRepository(_db || null);
+  }
+  return _agentRepo;
 }
 
 // ─── Use Case Factory ─────────────────────────────────────────────────────
@@ -181,7 +195,8 @@ export function buildReceiveMessageUseCase(): ReceiveMessageUseCase {
     quoteEngine,
     llmProvider,
     sendWhatsAppMessage as any,
-    emailService
+    emailService,
+    _db
   );
 
   return new ReceiveMessageUseCase(
@@ -192,4 +207,4 @@ export function buildReceiveMessageUseCase(): ReceiveMessageUseCase {
   );
 }
 
-export { _convRepo as convRepo, _leadRepo as leadRepo };
+export { _convRepo as convRepo, _leadRepo as leadRepo, _agentRepo as agentRepo };

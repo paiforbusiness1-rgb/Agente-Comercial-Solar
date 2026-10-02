@@ -5,7 +5,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { AppConfig } from '../../shared/config/AppConfig.js';
 import { logger } from '../../shared/logger/ConsoleLogger.js';
-import { buildReceiveMessageUseCase, convRepo, leadRepo } from './container.js';
+import { buildReceiveMessageUseCase, convRepo, leadRepo, getAgentRepo } from './container.js';
 import { AuthService, JwtPayload } from '../services/AuthService.js';
 import { GoogleAuthService } from '../services/GoogleAuthService.js';
 import { RateLimiterService } from '../services/RateLimiterService.js';
@@ -522,6 +522,127 @@ v2Router.post('/leads/:id/notes', requireAuth, async (req: Request, res: Respons
 
 v2Router.post('/reset-demo', requireAuth, async (req: Request, res: Response) => {
   return res.json({ success: true });
+});
+
+// ─── Agent Management CRUD (Protected by requireAuth + requireRole) ────────
+
+v2Router.get('/agents', requireAuth, async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const tenantId = (req.query.tenantId as string) || AppConfig.tenant.defaultId;
+    const agentRepo = getAgentRepo();
+    const agents = await agentRepo.findAll(tenantId);
+    // Mask phone number for security (last 4 digits visible) SSD Rule 6
+    const masked = agents.map(a => ({
+      ...a,
+      whatsappPhone: a.whatsappPhone
+        ? (a.whatsappPhone.length > 4
+            ? a.whatsappPhone.slice(0, -4).replace(/./g, '*') + a.whatsappPhone.slice(-4)
+            : a.whatsappPhone)
+        : '',
+    }));
+    return res.json({ agents: masked });
+  } catch (err: any) {
+    logger.error('[v2Router] Error in GET /agents', { error: err.message });
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+v2Router.post('/agents', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { name, email, whatsappPhone } = req.body || {};
+    if (!name || !email) {
+      return res.status(400).json({ error: 'name y email son obligatorios' });
+    }
+    const tenantId = req.body.tenantId || AppConfig.tenant.defaultId;
+    const agentRepo = getAgentRepo();
+    const agent = await agentRepo.save({
+      name: String(name).trim(),
+      email: String(email).trim().toLowerCase(),
+      whatsappPhone: String(whatsappPhone || '').trim().replace(/\D/g, ''),
+      tenantId,
+      isActive: true,
+      assignedLeadsCount: 0,
+    }, tenantId);
+
+    // Audit log
+    await AuditLogService.logEvent({
+      eventType: 'AGENT_CREATED',
+      userEmail: req.user!.email,
+      userRole: req.user!.role,
+      resourceId: agent.id,
+      tenantId,
+      ipAddress: getClientIp(req),
+      details: { agentName: agent.name, agentEmail: agent.email },
+    }).catch(e => logger.warn('[v2Router] Audit log failed for AGENT_CREATED', { error: e.message }));
+
+    return res.status(201).json({ success: true, agent });
+  } catch (err: any) {
+    logger.error('[v2Router] Error in POST /agents', { error: err.message });
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+v2Router.put('/agents/:agentId', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { agentId } = req.params;
+    const { name, email, whatsappPhone, isActive } = req.body || {};
+    const tenantId = req.body.tenantId || AppConfig.tenant.defaultId;
+    const agentRepo = getAgentRepo();
+    const existing = await agentRepo.findById(tenantId, agentId);
+    if (!existing) return res.status(404).json({ error: 'Agente no encontrado' });
+
+    const updated = await agentRepo.save({
+      ...existing,
+      name: name ? String(name).trim() : existing.name,
+      email: email ? String(email).trim().toLowerCase() : existing.email,
+      whatsappPhone: whatsappPhone !== undefined && whatsappPhone !== ''
+        ? String(whatsappPhone).trim().replace(/\D/g, '')
+        : existing.whatsappPhone,
+      isActive: isActive !== undefined ? Boolean(isActive) : existing.isActive,
+    }, tenantId);
+
+    // Audit log
+    await AuditLogService.logEvent({
+      eventType: 'AGENT_UPDATED',
+      userEmail: req.user!.email,
+      userRole: req.user!.role,
+      resourceId: agentId,
+      tenantId,
+      ipAddress: getClientIp(req),
+      details: { agentName: updated.name, isActive: updated.isActive },
+    }).catch(e => logger.warn('[v2Router] Audit log failed for AGENT_UPDATED', { error: e.message }));
+
+    return res.json({ success: true, agent: updated });
+  } catch (err: any) {
+    logger.error('[v2Router] Error in PUT /agents/:agentId', { error: err.message });
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+v2Router.delete('/agents/:agentId', requireAuth, requireRole(['admin']), async (req: AuthenticatedRequest, res: Response) => {
+  try {
+    const { agentId } = req.params;
+    const tenantId = (req.query.tenantId as string) || req.body.tenantId || AppConfig.tenant.defaultId;
+    const agentRepo = getAgentRepo();
+    const deleted = await agentRepo.delete(tenantId, agentId);
+    if (!deleted) return res.status(404).json({ error: 'Agente no encontrado' });
+
+    // Audit log
+    await AuditLogService.logEvent({
+      eventType: 'AGENT_DELETED',
+      userEmail: req.user!.email,
+      userRole: req.user!.role,
+      resourceId: agentId,
+      tenantId,
+      ipAddress: getClientIp(req),
+      details: { agentId },
+    }).catch(e => logger.warn('[v2Router] Audit log failed for AGENT_DELETED', { error: e.message }));
+
+    return res.json({ success: true });
+  } catch (err: any) {
+    logger.error('[v2Router] Error in DELETE /agents/:agentId', { error: err.message });
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 export { v2Router };

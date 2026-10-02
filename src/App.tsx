@@ -21,9 +21,10 @@ import { SimulatorView } from './components/SimulatorView';
 import { CopilotView } from './components/CopilotView';
 import { LoginView } from './components/LoginView';
 import { AuditLogView } from './components/AuditLogView';
+import { AgentsView } from './components/AgentsView';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<'chats' | 'leads' | 'simulator' | 'guide' | 'copilot' | 'audit'>('chats');
+  const [activeTab, setActiveTab] = useState<'chats' | 'leads' | 'simulator' | 'guide' | 'copilot' | 'audit' | 'agents'>('chats');
   const [isDarkMode, setIsDarkMode] = useState(true);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   
@@ -135,7 +136,7 @@ export default function App() {
             <span className={`text-[10px] font-bold px-2 py-1 rounded uppercase tracking-wider ${
               isDarkMode ? 'bg-slate-950 text-slate-400 border border-slate-855' : 'bg-slate-100 text-slate-600 border border-slate-200'
             }`}>
-              {activeTab === 'chats' ? '💬 Monitor de Chats' : activeTab === 'leads' ? '👥 Leads Calificados' : activeTab === 'copilot' ? '🤖 Copiloto IA (DB)' : activeTab === 'simulator' ? '🧪 Simulador' : activeTab === 'audit' ? '📜 Bitácora de Auditoría' : '📚 Guía'}
+              {activeTab === 'chats' ? '💬 Monitor de Chats' : activeTab === 'leads' ? '👥 Leads Calificados' : activeTab === 'copilot' ? '🤖 Copiloto IA (DB)' : activeTab === 'simulator' ? '🧪 Simulador' : activeTab === 'audit' ? '📜 Bitácora de Auditoría' : activeTab === 'agents' ? '👤 Agentes Comerciales' : '📚 Guía'}
             </span>
             <div className="hidden sm:flex items-center space-x-1.5 text-xs">
               <span className={isDarkMode ? 'text-slate-650' : 'text-slate-300'}>|</span>
@@ -301,6 +302,13 @@ export default function App() {
 
           {activeTab === 'audit' && (
             <AuditLogView
+              isDarkMode={isDarkMode}
+              showToast={showToast}
+            />
+          )}
+
+          {activeTab === 'agents' && (
+            <AgentsView
               isDarkMode={isDarkMode}
               showToast={showToast}
             />

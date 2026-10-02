@@ -33,6 +33,8 @@ export interface UserContext {
   botDisabled: boolean;
   latestUserMessage: string;
   historySummary?: string;
+  isReturningContext?: boolean;
+  previousSessionSummary?: string;
 }
 
 export interface SofiaLlmResponse {
@@ -54,6 +56,7 @@ export interface SofiaLlmResponse {
   propose_advisor_handoff?: boolean;
   trigger_human_handoff: boolean;
   handoff_reason?: string;
+  returning_user_greeted?: boolean;
   media_to_send?: 'FINANCIAMIENTO' | 'INSTALACION_PROFESIONAL' | 'COTIZACION_PDF' | null;
 }
 
@@ -82,6 +85,25 @@ export class SofiaPromptBuilder {
     const systemPrompt = `Eres Sofía, Asesora Comercial de O3 Energy México.
 Tu personalidad es cálida, empática, profesional y altamente orientada a brindar una excelente experiencia de usuario (U-First).
 Tu objetivo es guiar al cliente en un flujo comercial consultivo de 6 pasos en WhatsApp.
+
+REGLA 0 — MODO USUARIO DE REGRESO (PRIORIDAD MÁXIMA):
+Si <is_returning_context>true</is_returning_context>, analiza el mensaje del usuario semánticamente:
+- Si el usuario está saludando o iniciando conversación (en cualquier forma coloquial, modismo, variación o idioma, ej. "hola", "buenas tardes", "qué tal", "hey", "buenos días", etc.):
+  Tu ÚNICO objetivo es generar una bienvenida cálida, empática y natural que incluya:
+  a) Saludo personalizado por su nombre (ej. "¡Hola Héctor! 😊 Qué gusto saludarte de nuevo...")
+  b) Resumen breve de 1-2 líneas de dónde quedaron (apóyate en <previous_session_summary>)
+  c) Pregunta natural ofreciendo opciones claras:
+     - Retomar la asesoría donde se quedaron
+     - Conectarlo directamente con uno de nuestros asesores especializados
+  Establece obligatoriamente "returning_user_greeted": true en tu respuesta JSON.
+  PROHIBIDO: mostrar cotización instantánea, pedir datos ya recopilados o usar menús numerados robóticos.
+
+- Si el usuario NO está saludando y hace una pregunta concreta, aporta un dato nuevo o responde algo específico:
+  Responde directamente a lo consultado sin ritual de bienvenida.
+  Establece "returning_user_greeted": false en tu respuesta JSON.
+
+EJEMPLO DE BIENVENIDA IDEAL:
+"¡Hola Héctor! 😊 ¡Qué gusto verte de nuevo por aquí! La última vez estábamos revisando las opciones solares para tu hogar con tu recibo de luz. ¿Quieres que retomemos justo donde lo dejamos, o prefieres que te comunique con uno de nuestros asesores comerciales para avanzar de inmediato? ☀️"
 
 REGLAS ESENCIALES DE INTERACCIÓN Y CERO ALUCINACIÓN:
 
@@ -138,6 +160,7 @@ ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
   "propose_advisor_handoff": boolean,
   "trigger_human_handoff": boolean,
   "handoff_reason": string | null,
+  "returning_user_greeted": boolean,
   "media_to_send": "FINANCIAMIENTO" | "INSTALACION_PROFESIONAL" | "COTIZACION_PDF" | null
 }`;
 
@@ -152,6 +175,8 @@ ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
   </user_profile>
   <current_state>
     <step>${ctx.currentStep}</step>
+    <is_returning_context>${Boolean(ctx.isReturningContext)}</is_returning_context>
+    <previous_session_summary>${ctx.previousSessionSummary ? this.sanitizeInput(ctx.previousSessionSummary) : 'Sin sesión previa'}</previous_session_summary>
     <quote_consent_requested>${Boolean(ctx.quoteConsentRequested)}</quote_consent_requested>
     <quote_consent_given>${Boolean(ctx.quoteConsentGiven)}</quote_consent_given>
     <bot_disabled>${ctx.botDisabled}</bot_disabled>
@@ -188,6 +213,7 @@ ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
         propose_advisor_handoff: Boolean(parsed.propose_advisor_handoff),
         trigger_human_handoff: Boolean(parsed.trigger_human_handoff),
         handoff_reason: parsed.handoff_reason || undefined,
+        returning_user_greeted: Boolean(parsed.returning_user_greeted),
         media_to_send: parsed.media_to_send || null,
       };
     } catch (err) {

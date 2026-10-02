@@ -14,6 +14,8 @@ import { ILLMProvider } from '../../interfaces/ILLMProvider.js';
 import { SofiaPromptBuilder, SofiaLlmResponse } from '../builders/SofiaPromptBuilder.js';
 import { QuotePdfService } from '../../infrastructure/services/QuotePdfService.js';
 import { BillNormalizerService } from '../../domain/services/BillNormalizerService.js';
+import { AgentNotificationService, ProspectData } from '../../infrastructure/services/AgentNotificationService.js';
+import { AgentRepository } from '../../infrastructure/persistence/AgentRepository.js';
 import { AppConfig } from '../../shared/config/AppConfig.js';
 import { logger } from '../../shared/logger/ConsoleLogger.js';
 
@@ -42,7 +44,8 @@ export class SofiaFlowOrchestrator {
     private quoteEngine: IQuoteEngine,
     private llmProvider: ILLMProvider,
     private sendWhatsAppText: (phone: string, text: string) => Promise<boolean>,
-    private emailService: IEmailNotificationService
+    private emailService: IEmailNotificationService,
+    private db?: any
   ) {}
 
   public async processMessage(input: OrchestrationInput): Promise<OrchestrationOutput> {
@@ -64,6 +67,29 @@ export class SofiaFlowOrchestrator {
     if (conv.botDisabled) {
       logger.info(`[SofiaFlowOrchestrator] Bot disabled for ${phone}. Skipping automated response.`);
       return { replyText: '', nextStep: 6, botDisabled: true };
+    }
+
+    // Detect returning user context (state-only evaluation — no hardcoded greetings)
+    const isReturningContext =
+      conv.messages.length >= 2 &&
+      conv.nombre !== 'Cliente' &&
+      conv.state.phase !== 'GREETING' &&
+      conv.state.phase !== 'HUMAN_HANDOFF' &&
+      !(conv.state as any).returningUserAcknowledged;
+
+    // Build previous session summary for LLM context
+    let previousSessionSummary: string | undefined;
+    if (isReturningContext) {
+      const bill = conv.state.monthlyBill ? `$${conv.state.monthlyBill} MXN/mes` : null;
+      const phase = conv.state.phase;
+      const parts = [
+        bill ? `recibo de ${bill}` : null,
+        phase === 'QUOTATION' || phase === 'FINANCING' ? 'se presentó cotización preliminar' : null,
+        phase === 'TECHNICAL_SURVEY' ? 'se evaluaba el sistema técnico' : null,
+      ].filter(Boolean);
+      previousSessionSummary = parts.length > 0
+        ? `Conversación previa: ${parts.join(', ')}.`
+        : 'El cliente ha interactuado previamente con Sofía.';
     }
 
     // Determine step integer (1 to 6)
@@ -119,6 +145,8 @@ export class SofiaFlowOrchestrator {
       botDisabled: conv.botDisabled,
       latestUserMessage: messageText,
       historySummary: conv.messages.slice(-6).map(m => `${m.sender}: ${m.text}`).join('\n'),
+      isReturningContext,
+      previousSessionSummary,
     };
 
     const { systemPrompt, userContent } = SofiaPromptBuilder.buildPrompt(promptCtx);
@@ -134,6 +162,10 @@ export class SofiaFlowOrchestrator {
     );
 
     const parsed: SofiaLlmResponse = SofiaPromptBuilder.parseResponse(rawLlmOutput.text || '');
+
+    if (parsed.returning_user_greeted) {
+      (conv.state as any).returningUserAcknowledged = true;
+    }
 
     const mediaSent: string[] = [];
     let finalReply = parsed.message_to_user;
@@ -319,16 +351,38 @@ export class SofiaFlowOrchestrator {
 
       await this.leadRepo.save(lead);
 
-      await this.emailService.sendLeadNotification({
-        leadName: name,
-        phone,
-        monthlyBill: conv.state.monthlyBill || 0,
-        notes: `Solicitud de atención humana en WhatsApp: ${reason}`,
-      });
+      // ✅ Dual notification via AgentNotificationService (Email + WA Template HSM)
+      const agentRepo = new AgentRepository(this.db);
+      const notificationService = new AgentNotificationService(agentRepo);
+      const agent = await notificationService.getAssignedAgent(conv.tenantId);
 
-      logger.info(`[SofiaFlowOrchestrator] Lead handoff email sent for ${phone}`);
+      const prospect: ProspectData = {
+        nombre: name,
+        phone,
+        montoRecibo: `$${conv.state.monthlyBill || 0} MXN/mes`,
+        sistemaEstimado: conv.state.roofType || 'Sistema Residencial',
+        location: (conv.state as any).location,
+        handoffReason: reason,
+        conversationSummary: conv.messages.slice(-4).map((m: any) => `${m.sender}: ${m.text}`).join('\n'),
+      };
+
+      await notificationService.notify(agent, prospect, conv.tenantId);
+
+      // Fallback legacy email check if notification service didn't send
+      logger.info(`[SofiaFlowOrchestrator] Lead handoff completed for ${phone} (Assigned Agent: ${agent.name})`);
     } catch (err: any) {
-      logger.error(`[SofiaFlowOrchestrator] Lead handoff email trigger failed:`, err);
+      logger.error(`[SofiaFlowOrchestrator] Lead handoff failed:`, err);
+      // Fallback to basic email notification
+      try {
+        await this.emailService.sendLeadNotification({
+          leadName: name,
+          phone,
+          monthlyBill: conv.state.monthlyBill || 0,
+          notes: `Solicitud de atención humana en WhatsApp: ${reason}`,
+        });
+      } catch (emailErr) {
+        logger.error(`[SofiaFlowOrchestrator] Fallback email notification also failed:`, emailErr);
+      }
     }
   }
 }

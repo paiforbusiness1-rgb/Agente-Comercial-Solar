@@ -161,11 +161,29 @@ export class FirestoreConversationRepository implements IConversationRepository 
 
   async findTrash(tenantId: string): Promise<Conversation[]> {
     try {
-      const snap = await this.db
+      // 1. Query new deleted_chats collection (archived hard-deletes)
+      const deletedSnap = await this.db
+        .collection(`tenants/${tenantId}/deleted_chats`)
+        .get();
+      const archived: Conversation[] = deletedSnap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+
+      // 2. Query legacy soft-deleted in chats collection for backward compatibility
+      const legacySnap = await this.db
         .collection(`tenants/${tenantId}/chats`)
         .where('status', '==', 'deleted')
         .get();
-      return snap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+      const legacy: Conversation[] = legacySnap.docs.map((d: any) => ({ id: d.id, ...d.data() }));
+
+      const combinedMap = new Map<string, Conversation>();
+      archived.forEach(c => combinedMap.set(c.phone || c.id, c));
+      legacy.forEach(c => {
+        const key = c.phone || c.id;
+        if (!combinedMap.has(key)) combinedMap.set(key, c);
+      });
+
+      return Array.from(combinedMap.values()).sort((a, b) =>
+        (b.deletedAt || '').localeCompare(a.deletedAt || '')
+      );
     } catch (err: any) {
       logger.warn('[FirestoreConversationRepo] Fallback to In-Memory for findTrash', { error: err.message });
       return inMemoryConvFallback.findTrash(tenantId);
@@ -174,23 +192,54 @@ export class FirestoreConversationRepository implements IConversationRepository 
 
   async softDelete(tenantId: string, phone: string, deletedBy: string): Promise<boolean> {
     await inMemoryConvFallback.softDelete(tenantId, phone, deletedBy);
-    try {
-      const docRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
-      await docRef.set({
+
+    const chatRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
+    const snap = await chatRef.get();
+    if (!snap.exists) return false;
+
+    // ✅ Archive to deleted_chats with SAME document ID (phone)
+    // Preserves referential integrity for AuditLogView cross-referencing
+    await this.db
+      .collection(`tenants/${tenantId}/deleted_chats`)
+      .doc(phone)
+      .set({
+        ...snap.data()!,
+        phone,
+        originalPhone: phone,
         status: 'deleted',
         deletedAt: new Date().toISOString(),
         deletedBy,
-      }, { merge: true });
-      return true;
-    } catch (err: any) {
-      logger.warn('[FirestoreConversationRepo] Firestore softDelete failed', { error: err.message });
-      return false;
-    }
+        _archivedFrom: `tenants/${tenantId}/chats/${phone}`,
+      });
+
+    // Hard-delete the primary document
+    await chatRef.delete();
+    logger.info(`[ConversationRepo] Hard-deleted chat ${phone} — archived to deleted_chats`);
+    return true;
   }
 
   async restore(tenantId: string, phone: string): Promise<boolean> {
     await inMemoryConvFallback.restore(tenantId, phone);
     try {
+      // 1. Check if archived in deleted_chats
+      const deletedRef = this.db.collection(`tenants/${tenantId}/deleted_chats`).doc(phone);
+      const snap = await deletedRef.get();
+
+      if (snap.exists) {
+        const data = snap.data()!;
+        const chatRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
+        await chatRef.set({
+          ...data,
+          status: 'active',
+          deletedAt: null,
+          deletedBy: null,
+        });
+        await deletedRef.delete();
+        logger.info(`[ConversationRepo] Restored chat ${phone} from deleted_chats to active chats`);
+        return true;
+      }
+
+      // 2. Legacy fallback in chats
       const docRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
       await docRef.set({
         status: 'active',
@@ -210,20 +259,32 @@ export class FirestoreConversationRepository implements IConversationRepository 
     let purgedCount = 0;
 
     try {
-      let query = this.db.collection(`tenants/${tenantId}/chats`).where('status', '==', 'deleted');
-      if (daysRetention > 0) {
-        query = query.where('deletedAt', '<', cutoffIso);
-      }
-      const snap = await query.get();
+      const batch = this.db.batch();
 
-      if (!snap.empty) {
-        const batch = this.db.batch();
-        snap.docs.forEach((doc: any) => {
+      // 1. Purge from deleted_chats
+      const delSnap = await this.db.collection(`tenants/${tenantId}/deleted_chats`).get();
+      delSnap.docs.forEach((doc: any) => {
+        const deletedAt = doc.data()?.deletedAt;
+        if (daysRetention === 0 || (deletedAt && deletedAt < cutoffIso)) {
           batch.delete(doc.ref);
           purgedCount++;
-        });
+        }
+      });
+
+      // 2. Also purge legacy chats with status == 'deleted'
+      let legacyQuery = this.db.collection(`tenants/${tenantId}/chats`).where('status', '==', 'deleted');
+      if (daysRetention > 0) {
+        legacyQuery = legacyQuery.where('deletedAt', '<', cutoffIso);
+      }
+      const legSnap = await legacyQuery.get();
+      legSnap.docs.forEach((doc: any) => {
+        batch.delete(doc.ref);
+        purgedCount++;
+      });
+
+      if (purgedCount > 0) {
         await batch.commit();
-        logger.info(`[FirestoreConversationRepo] Purged ${purgedCount} soft-deleted chats with ${daysRetention} days retention filter`);
+        logger.info(`[FirestoreConversationRepo] Purged ${purgedCount} chats (deleted_chats + legacy) with ${daysRetention} days retention filter`);
       }
     } catch (err: any) {
       logger.warn('[FirestoreConversationRepo] Firestore purgeExpiredTrash failed', { error: err.message });

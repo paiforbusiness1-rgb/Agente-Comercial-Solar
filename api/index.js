@@ -2,7 +2,7 @@
 import express from "express";
 import { initializeApp, getApps as getApps5, cert } from "firebase-admin/app";
 import { getFirestore as getFirestore4 } from "firebase-admin/firestore";
-import nodemailer2 from "nodemailer";
+import nodemailer3 from "nodemailer";
 
 // server/infrastructure/web/v2Router.ts
 import { Router } from "express";
@@ -24,7 +24,8 @@ var AppConfig = {
     return {
       verifyToken: process.env.WHATSAPP_VERIFY_TOKEN || "O3_ENERGY_MEXICO_TOKEN",
       accessToken: process.env.WHATSAPP_ACCESS_TOKEN || "",
-      phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID || ""
+      phoneNumberId: process.env.WHATSAPP_PHONE_NUMBER_ID || "",
+      waAgentTemplateName: process.env.WA_AGENT_TEMPLATE_NAME || "notificacion_nuevo_prospecto"
     };
   },
   get groq() {
@@ -55,6 +56,12 @@ var AppConfig = {
       adminPasswordHash: process.env.ADMIN_PASSWORD_HASH || "",
       jwtSecret: process.env.JWT_SECRET || "fallback-super-secret-jwt-key-minimum-32-chars-entropy-2026",
       tokenExpiresInHours: parseInt(process.env.JWT_EXPIRES_IN_HOURS || "8", 10)
+    };
+  },
+  get agents() {
+    return {
+      fallbackEmail: process.env.FALLBACK_AGENT_EMAIL || "ventas@o3energy.mx",
+      fallbackWhatsapp: process.env.FALLBACK_AGENT_WA || ""
     };
   }
 };
@@ -407,8 +414,19 @@ var FirestoreConversationRepository = class {
   }
   async findTrash(tenantId) {
     try {
-      const snap = await this.db.collection(`tenants/${tenantId}/chats`).where("status", "==", "deleted").get();
-      return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      const deletedSnap = await this.db.collection(`tenants/${tenantId}/deleted_chats`).get();
+      const archived = deletedSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      const legacySnap = await this.db.collection(`tenants/${tenantId}/chats`).where("status", "==", "deleted").get();
+      const legacy = legacySnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      const combinedMap = /* @__PURE__ */ new Map();
+      archived.forEach((c) => combinedMap.set(c.phone || c.id, c));
+      legacy.forEach((c) => {
+        const key = c.phone || c.id;
+        if (!combinedMap.has(key)) combinedMap.set(key, c);
+      });
+      return Array.from(combinedMap.values()).sort(
+        (a, b) => (b.deletedAt || "").localeCompare(a.deletedAt || "")
+      );
     } catch (err) {
       logger.warn("[FirestoreConversationRepo] Fallback to In-Memory for findTrash", { error: err.message });
       return inMemoryConvFallback.findTrash(tenantId);
@@ -416,22 +434,40 @@ var FirestoreConversationRepository = class {
   }
   async softDelete(tenantId, phone, deletedBy) {
     await inMemoryConvFallback.softDelete(tenantId, phone, deletedBy);
-    try {
-      const docRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
-      await docRef.set({
-        status: "deleted",
-        deletedAt: (/* @__PURE__ */ new Date()).toISOString(),
-        deletedBy
-      }, { merge: true });
-      return true;
-    } catch (err) {
-      logger.warn("[FirestoreConversationRepo] Firestore softDelete failed", { error: err.message });
-      return false;
-    }
+    const chatRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
+    const snap = await chatRef.get();
+    if (!snap.exists) return false;
+    await this.db.collection(`tenants/${tenantId}/deleted_chats`).doc(phone).set({
+      ...snap.data(),
+      phone,
+      originalPhone: phone,
+      status: "deleted",
+      deletedAt: (/* @__PURE__ */ new Date()).toISOString(),
+      deletedBy,
+      _archivedFrom: `tenants/${tenantId}/chats/${phone}`
+    });
+    await chatRef.delete();
+    logger.info(`[ConversationRepo] Hard-deleted chat ${phone} \u2014 archived to deleted_chats`);
+    return true;
   }
   async restore(tenantId, phone) {
     await inMemoryConvFallback.restore(tenantId, phone);
     try {
+      const deletedRef = this.db.collection(`tenants/${tenantId}/deleted_chats`).doc(phone);
+      const snap = await deletedRef.get();
+      if (snap.exists) {
+        const data = snap.data();
+        const chatRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
+        await chatRef.set({
+          ...data,
+          status: "active",
+          deletedAt: null,
+          deletedBy: null
+        });
+        await deletedRef.delete();
+        logger.info(`[ConversationRepo] Restored chat ${phone} from deleted_chats to active chats`);
+        return true;
+      }
       const docRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
       await docRef.set({
         status: "active",
@@ -449,19 +485,27 @@ var FirestoreConversationRepository = class {
     const cutoffIso = new Date(Date.now() - daysRetention * 24 * 60 * 60 * 1e3).toISOString();
     let purgedCount = 0;
     try {
-      let query = this.db.collection(`tenants/${tenantId}/chats`).where("status", "==", "deleted");
-      if (daysRetention > 0) {
-        query = query.where("deletedAt", "<", cutoffIso);
-      }
-      const snap = await query.get();
-      if (!snap.empty) {
-        const batch = this.db.batch();
-        snap.docs.forEach((doc) => {
+      const batch = this.db.batch();
+      const delSnap = await this.db.collection(`tenants/${tenantId}/deleted_chats`).get();
+      delSnap.docs.forEach((doc) => {
+        const deletedAt = doc.data()?.deletedAt;
+        if (daysRetention === 0 || deletedAt && deletedAt < cutoffIso) {
           batch.delete(doc.ref);
           purgedCount++;
-        });
+        }
+      });
+      let legacyQuery = this.db.collection(`tenants/${tenantId}/chats`).where("status", "==", "deleted");
+      if (daysRetention > 0) {
+        legacyQuery = legacyQuery.where("deletedAt", "<", cutoffIso);
+      }
+      const legSnap = await legacyQuery.get();
+      legSnap.docs.forEach((doc) => {
+        batch.delete(doc.ref);
+        purgedCount++;
+      });
+      if (purgedCount > 0) {
         await batch.commit();
-        logger.info(`[FirestoreConversationRepo] Purged ${purgedCount} soft-deleted chats with ${daysRetention} days retention filter`);
+        logger.info(`[FirestoreConversationRepo] Purged ${purgedCount} chats (deleted_chats + legacy) with ${daysRetention} days retention filter`);
       }
     } catch (err) {
       logger.warn("[FirestoreConversationRepo] Firestore purgeExpiredTrash failed", { error: err.message });
@@ -566,6 +610,25 @@ var SofiaPromptBuilder = class {
 Tu personalidad es c\xE1lida, emp\xE1tica, profesional y altamente orientada a brindar una excelente experiencia de usuario (U-First).
 Tu objetivo es guiar al cliente en un flujo comercial consultivo de 6 pasos en WhatsApp.
 
+REGLA 0 \u2014 MODO USUARIO DE REGRESO (PRIORIDAD M\xC1XIMA):
+Si <is_returning_context>true</is_returning_context>, analiza el mensaje del usuario sem\xE1nticamente:
+- Si el usuario est\xE1 saludando o iniciando conversaci\xF3n (en cualquier forma coloquial, modismo, variaci\xF3n o idioma, ej. "hola", "buenas tardes", "qu\xE9 tal", "hey", "buenos d\xEDas", etc.):
+  Tu \xDANICO objetivo es generar una bienvenida c\xE1lida, emp\xE1tica y natural que incluya:
+  a) Saludo personalizado por su nombre (ej. "\xA1Hola H\xE9ctor! \u{1F60A} Qu\xE9 gusto saludarte de nuevo...")
+  b) Resumen breve de 1-2 l\xEDneas de d\xF3nde quedaron (ap\xF3yate en <previous_session_summary>)
+  c) Pregunta natural ofreciendo opciones claras:
+     - Retomar la asesor\xEDa donde se quedaron
+     - Conectarlo directamente con uno de nuestros asesores especializados
+  Establece obligatoriamente "returning_user_greeted": true en tu respuesta JSON.
+  PROHIBIDO: mostrar cotizaci\xF3n instant\xE1nea, pedir datos ya recopilados o usar men\xFAs numerados rob\xF3ticos.
+
+- Si el usuario NO est\xE1 saludando y hace una pregunta concreta, aporta un dato nuevo o responde algo espec\xEDfico:
+  Responde directamente a lo consultado sin ritual de bienvenida.
+  Establece "returning_user_greeted": false en tu respuesta JSON.
+
+EJEMPLO DE BIENVENIDA IDEAL:
+"\xA1Hola H\xE9ctor! \u{1F60A} \xA1Qu\xE9 gusto verte de nuevo por aqu\xED! La \xFAltima vez est\xE1bamos revisando las opciones solares para tu hogar con tu recibo de luz. \xBFQuieres que retomemos justo donde lo dejamos, o prefieres que te comunique con uno de nuestros asesores comerciales para avanzar de inmediato? \u2600\uFE0F"
+
 REGLAS ESENCIALES DE INTERACCI\xD3N Y CERO ALUCINACI\xD3N:
 
 1. MANEJO GRACEFUL DEL NOMBRE (PASO 1):
@@ -621,6 +684,7 @@ ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
   "propose_advisor_handoff": boolean,
   "trigger_human_handoff": boolean,
   "handoff_reason": string | null,
+  "returning_user_greeted": boolean,
   "media_to_send": "FINANCIAMIENTO" | "INSTALACION_PROFESIONAL" | "COTIZACION_PDF" | null
 }`;
     const cleanMessage = this.sanitizeInput(ctx.latestUserMessage);
@@ -633,6 +697,8 @@ ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
   </user_profile>
   <current_state>
     <step>${ctx.currentStep}</step>
+    <is_returning_context>${Boolean(ctx.isReturningContext)}</is_returning_context>
+    <previous_session_summary>${ctx.previousSessionSummary ? this.sanitizeInput(ctx.previousSessionSummary) : "Sin sesi\xF3n previa"}</previous_session_summary>
     <quote_consent_requested>${Boolean(ctx.quoteConsentRequested)}</quote_consent_requested>
     <quote_consent_given>${Boolean(ctx.quoteConsentGiven)}</quote_consent_given>
     <bot_disabled>${ctx.botDisabled}</bot_disabled>
@@ -666,6 +732,7 @@ ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
         propose_advisor_handoff: Boolean(parsed.propose_advisor_handoff),
         trigger_human_handoff: Boolean(parsed.trigger_human_handoff),
         handoff_reason: parsed.handoff_reason || void 0,
+        returning_user_greeted: Boolean(parsed.returning_user_greeted),
         media_to_send: parsed.media_to_send || null
       };
     } catch (err) {
@@ -962,15 +1029,346 @@ var BillNormalizerService = class {
   }
 };
 
+// server/infrastructure/services/AgentNotificationService.ts
+import nodemailer from "nodemailer";
+var AgentNotificationService = class {
+  constructor(agentRepo) {
+    this.agentRepo = agentRepo;
+  }
+  // ─── Agent Assignment (Round-Robin by assignedLeadsCount) ──────────────────
+  async getAssignedAgent(tenantId) {
+    const agents = await this.agentRepo.findActiveAgents(tenantId);
+    if (agents.length > 0) {
+      return agents[0];
+    }
+    logger.warn("[AgentNotification] No active agents found \u2014 using fallback agent config");
+    return {
+      id: "fallback",
+      tenantId,
+      name: "Equipo Comercial O3 Energy",
+      email: AppConfig.agents.fallbackEmail,
+      whatsappPhone: AppConfig.agents.fallbackWhatsapp,
+      isActive: true,
+      assignedLeadsCount: 0,
+      createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+      updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+    };
+  }
+  // ─── Dual Notification Orchestrator ────────────────────────────────────────
+  async notify(agent, prospect, tenantId) {
+    const [emailResult, waResult] = await Promise.allSettled([
+      this.notifyEmail(agent, prospect),
+      this.notifyWhatsApp(agent, prospect)
+    ]);
+    if (emailResult.status === "fulfilled" && emailResult.value) {
+      logger.info("[AgentNotification] Email sent successfully", { agent: agent.email });
+    } else {
+      logger.error("[AgentNotification] CRITICAL: Email notification failed", {
+        agent: agent.email,
+        error: emailResult.status === "rejected" ? emailResult.reason : "unknown"
+      });
+    }
+    if (waResult.status === "fulfilled" && waResult.value) {
+      logger.info("[AgentNotification] WhatsApp template sent successfully", { phone: agent.whatsappPhone });
+    } else {
+      logger.warn("[AgentNotification] WhatsApp notification failed \u2014 email fallback active", {
+        phone: agent.whatsappPhone,
+        error: waResult.status === "rejected" ? waResult.reason : "skipped"
+      });
+    }
+    if (agent.id !== "fallback") {
+      await this.agentRepo.incrementLeadCount(tenantId, agent.id).catch(
+        (err) => logger.warn("[AgentNotification] Failed to increment lead count", { error: err.message })
+      );
+    }
+  }
+  // ─── Email Premium ─────────────────────────────────────────────────────────
+  async notifyEmail(agent, prospect) {
+    const { server, port, user, pass } = AppConfig.smtp;
+    if (!pass) {
+      logger.info("[AgentNotification Email SIM]", { agent: agent.email, prospect: prospect.nombre });
+      return true;
+    }
+    const portalUrl = AppConfig.appUrl;
+    const subject = `\u{1F525} URGE CONTACTAR \u2014 ${prospect.nombre} (+${prospect.phone})`;
+    const html = `
+<!DOCTYPE html>
+<html lang="es">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#0f172a;font-family:system-ui,-apple-system,sans-serif;">
+  <div style="max-width:600px;margin:0 auto;padding:24px;">
+    <div style="background:linear-gradient(135deg,#f59e0b,#d97706);border-radius:16px 16px 0 0;padding:32px;text-align:center;">
+      <h1 style="margin:0;color:#0f172a;font-size:22px;font-weight:800;">\u{1F525} PROSPECTO CALIFICADO</h1>
+      <p style="margin:8px 0 0;color:#451a03;font-size:14px;opacity:0.9;">O3 Energy M\xE9xico \u2014 Sof\xEDa IA Comercial</p>
+    </div>
+    <div style="background:#1e293b;border-radius:0 0 16px 16px;padding:32px;">
+      <div style="background:#0f172a;border-radius:12px;padding:24px;margin-bottom:24px;">
+        <table style="width:100%;border-collapse:collapse;">
+          <tr><td style="padding:10px 0;color:#94a3b8;font-size:13px;font-weight:600;">\u{1F464} NOMBRE</td><td style="padding:10px 0;color:#f1f5f9;font-size:14px;font-weight:700;">${prospect.nombre}</td></tr>
+          <tr><td style="padding:10px 0;color:#94a3b8;font-size:13px;font-weight:600;">\u{1F4F1} WHATSAPP</td><td style="padding:10px 0;"><a href="https://wa.me/${prospect.phone}" style="color:#f59e0b;font-weight:700;text-decoration:none;">+${prospect.phone}</a></td></tr>
+          <tr><td style="padding:10px 0;color:#94a3b8;font-size:13px;font-weight:600;">\u{1F4B0} RECIBO CFE</td><td style="padding:10px 0;color:#f59e0b;font-size:15px;font-weight:800;">${prospect.montoRecibo}</td></tr>
+          <tr><td style="padding:10px 0;color:#94a3b8;font-size:13px;font-weight:600;">\u26A1 SISTEMA EST.</td><td style="padding:10px 0;color:#f1f5f9;font-size:14px;">${prospect.sistemaEstimado}</td></tr>
+          ${prospect.location ? `<tr><td style="padding:10px 0;color:#94a3b8;font-size:13px;font-weight:600;">\u{1F4CD} UBICACI\xD3N</td><td style="padding:10px 0;color:#f1f5f9;font-size:14px;">${prospect.location}</td></tr>` : ""}
+          ${prospect.handoffReason ? `<tr><td style="padding:10px 0;color:#94a3b8;font-size:13px;font-weight:600;">\u{1F4AC} MOTIVO</td><td style="padding:10px 0;color:#f1f5f9;font-size:14px;">${prospect.handoffReason}</td></tr>` : ""}
+        </table>
+      </div>
+      <div style="text-align:center;">
+        <a href="${portalUrl}" style="display:inline-block;background:linear-gradient(135deg,#f59e0b,#d97706);color:#0f172a;font-weight:800;font-size:15px;padding:14px 32px;border-radius:12px;text-decoration:none;">\u2600\uFE0F Abrir Portal y Responder</a>
+      </div>
+      <p style="margin:24px 0 0;text-align:center;color:#475569;font-size:12px;">Agente: ${agent.name} \u2014 ${agent.email}</p>
+    </div>
+  </div>
+</body>
+</html>`;
+    try {
+      const transporter = nodemailer.createTransport({
+        host: server,
+        port,
+        secure: port === 465,
+        auth: { user, pass }
+      });
+      await transporter.sendMail({ from: `"Sof\xEDa IA - O3 Energy" <${user}>`, to: agent.email, subject, html });
+      return true;
+    } catch (err) {
+      logger.error("[AgentNotification] Email send failed", { error: err.message });
+      throw err;
+    }
+  }
+  // ─── WhatsApp HSM Template (Meta-compliant) ────────────────────────────────
+  async notifyWhatsApp(agent, prospect) {
+    const { accessToken, phoneNumberId, waAgentTemplateName } = AppConfig.meta;
+    if (!accessToken || !phoneNumberId) {
+      logger.info("[AgentNotification WA SIM] Would send WA template to agent", { phone: agent.whatsappPhone });
+      return true;
+    }
+    if (!agent.whatsappPhone) {
+      logger.warn("[AgentNotification] Agent has no WhatsApp phone configured \u2014 skipping WA");
+      return false;
+    }
+    try {
+      const payload = {
+        messaging_product: "whatsapp",
+        to: agent.whatsappPhone,
+        type: "template",
+        template: {
+          name: waAgentTemplateName,
+          // Configurable via env var — zero hardcoding
+          language: { code: "es_MX" },
+          components: [{
+            type: "body",
+            parameters: [
+              { type: "text", text: prospect.nombre.substring(0, 60) },
+              // {{1}}
+              { type: "text", text: prospect.phone },
+              // {{2}}
+              { type: "text", text: prospect.montoRecibo },
+              // {{3}}
+              { type: "text", text: prospect.sistemaEstimado.substring(0, 60) }
+              // {{4}}
+            ]
+          }]
+        }
+      };
+      const res = await fetch(
+        `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`,
+        { method: "POST", headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" }, body: JSON.stringify(payload) }
+      );
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        throw new Error(`Meta API ${res.status}: ${JSON.stringify(errData)}`);
+      }
+      return true;
+    } catch (err) {
+      logger.warn("[AgentNotification] WhatsApp template failed \u2014 email fallback active", {
+        agent: agent.email,
+        error: err.message
+      });
+      return false;
+    }
+  }
+};
+
+// server/infrastructure/persistence/AgentRepository.ts
+var inMemoryAgentsStore = {};
+var AgentRepository = class {
+  constructor(db2) {
+    this.db = db2;
+  }
+  col(tenantId) {
+    if (this.db) {
+      return this.db.collection(`tenants/${tenantId}/config/agents`);
+    }
+    return null;
+  }
+  getTenantStore(tenantId) {
+    if (!inMemoryAgentsStore[tenantId]) {
+      inMemoryAgentsStore[tenantId] = {};
+    }
+    return inMemoryAgentsStore[tenantId];
+  }
+  async findAll(tenantId) {
+    const colRef = this.col(tenantId);
+    if (colRef) {
+      try {
+        const snap = await colRef.orderBy("createdAt", "asc").get();
+        return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      } catch (err) {
+        logger.warn("[AgentRepo] Fallback to In-Memory for findAll", { error: err.message });
+      }
+    }
+    const store = this.getTenantStore(tenantId);
+    return Object.values(store).sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+  }
+  async findById(tenantId, agentId) {
+    const colRef = this.col(tenantId);
+    if (colRef) {
+      try {
+        const doc = await colRef.doc(agentId).get();
+        if (!doc.exists) return null;
+        return { id: doc.id, ...doc.data() };
+      } catch (err) {
+        logger.warn("[AgentRepo] Fallback to In-Memory for findById", { error: err.message });
+      }
+    }
+    const store = this.getTenantStore(tenantId);
+    return store[agentId] || null;
+  }
+  async findActiveAgents(tenantId) {
+    const colRef = this.col(tenantId);
+    if (colRef) {
+      try {
+        const snap = await colRef.where("isActive", "==", true).orderBy("assignedLeadsCount", "asc").get();
+        return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+      } catch (err) {
+        logger.warn("[AgentRepo] Fallback to In-Memory for findActiveAgents", { error: err.message });
+      }
+    }
+    const store = this.getTenantStore(tenantId);
+    return Object.values(store).filter((a) => a.isActive).sort((a, b) => a.assignedLeadsCount - b.assignedLeadsCount);
+  }
+  async save(agent, tenantId) {
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const store = this.getTenantStore(tenantId);
+    if (agent.id) {
+      const colRef2 = this.col(tenantId);
+      if (colRef2) {
+        try {
+          const ref = colRef2.doc(agent.id);
+          await ref.set({ ...agent, updatedAt: now }, { merge: true });
+        } catch (err) {
+          logger.warn("[AgentRepo] Fallback to In-Memory for save update", { error: err.message });
+        }
+      }
+      const existing = store[agent.id] || {};
+      const updated = {
+        ...existing,
+        ...agent,
+        id: agent.id,
+        tenantId,
+        updatedAt: now
+      };
+      store[agent.id] = updated;
+      return updated;
+    }
+    const colRef = this.col(tenantId);
+    const newId = colRef ? colRef.doc().id : `agent_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+    const newAgent = {
+      ...agent,
+      id: newId,
+      tenantId,
+      assignedLeadsCount: agent.assignedLeadsCount ?? 0,
+      isActive: agent.isActive ?? true,
+      createdAt: now,
+      updatedAt: now
+    };
+    if (colRef) {
+      try {
+        await colRef.doc(newId).set(newAgent);
+      } catch (err) {
+        logger.warn("[AgentRepo] Fallback to In-Memory for save create", { error: err.message });
+      }
+    }
+    store[newId] = newAgent;
+    return newAgent;
+  }
+  async deactivate(tenantId, agentId) {
+    const colRef = this.col(tenantId);
+    if (colRef) {
+      try {
+        const ref = colRef.doc(agentId);
+        const doc = await ref.get();
+        if (doc.exists) {
+          await ref.update({ isActive: false, updatedAt: (/* @__PURE__ */ new Date()).toISOString() });
+        }
+      } catch (err) {
+        logger.warn("[AgentRepo] Fallback to In-Memory for deactivate", { error: err.message });
+      }
+    }
+    const store = this.getTenantStore(tenantId);
+    if (store[agentId]) {
+      store[agentId].isActive = false;
+      store[agentId].updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+      return true;
+    }
+    return false;
+  }
+  async incrementLeadCount(tenantId, agentId) {
+    const colRef = this.col(tenantId);
+    if (colRef) {
+      try {
+        const ref = colRef.doc(agentId);
+        const snap = await ref.get();
+        if (snap.exists) {
+          const current = snap.data()?.assignedLeadsCount || 0;
+          await ref.update({
+            assignedLeadsCount: current + 1,
+            updatedAt: (/* @__PURE__ */ new Date()).toISOString()
+          });
+        }
+      } catch (err) {
+        logger.warn("[AgentRepo] Fallback to In-Memory for incrementLeadCount", { error: err.message });
+      }
+    }
+    const store = this.getTenantStore(tenantId);
+    if (store[agentId]) {
+      store[agentId].assignedLeadsCount = (store[agentId].assignedLeadsCount || 0) + 1;
+      store[agentId].updatedAt = (/* @__PURE__ */ new Date()).toISOString();
+    }
+  }
+  async delete(tenantId, agentId) {
+    const colRef = this.col(tenantId);
+    let firestoreDeleted = false;
+    if (colRef) {
+      try {
+        const ref = colRef.doc(agentId);
+        const doc = await ref.get();
+        if (doc.exists) {
+          await ref.delete();
+          firestoreDeleted = true;
+        }
+      } catch (err) {
+        logger.warn("[AgentRepo] Fallback to In-Memory for delete", { error: err.message });
+      }
+    }
+    const store = this.getTenantStore(tenantId);
+    if (store[agentId]) {
+      delete store[agentId];
+      return true;
+    }
+    return firestoreDeleted;
+  }
+};
+
 // server/application/orchestration/SofiaFlowOrchestrator.ts
 var SofiaFlowOrchestrator = class {
-  constructor(conversationRepo, leadRepo, quoteEngine2, llmProvider2, sendWhatsAppText, emailService2) {
+  constructor(conversationRepo, leadRepo, quoteEngine2, llmProvider2, sendWhatsAppText, emailService2, db2) {
     this.conversationRepo = conversationRepo;
     this.leadRepo = leadRepo;
     this.quoteEngine = quoteEngine2;
     this.llmProvider = llmProvider2;
     this.sendWhatsAppText = sendWhatsAppText;
     this.emailService = emailService2;
+    this.db = db2;
   }
   async processMessage(input) {
     const { tenantId, phone, userName, messageText } = input;
@@ -983,6 +1381,18 @@ var SofiaFlowOrchestrator = class {
     if (conv.botDisabled) {
       logger.info(`[SofiaFlowOrchestrator] Bot disabled for ${phone}. Skipping automated response.`);
       return { replyText: "", nextStep: 6, botDisabled: true };
+    }
+    const isReturningContext = conv.messages.length >= 2 && conv.nombre !== "Cliente" && conv.state.phase !== "GREETING" && conv.state.phase !== "HUMAN_HANDOFF" && !conv.state.returningUserAcknowledged;
+    let previousSessionSummary;
+    if (isReturningContext) {
+      const bill = conv.state.monthlyBill ? `$${conv.state.monthlyBill} MXN/mes` : null;
+      const phase = conv.state.phase;
+      const parts = [
+        bill ? `recibo de ${bill}` : null,
+        phase === "QUOTATION" || phase === "FINANCING" ? "se present\xF3 cotizaci\xF3n preliminar" : null,
+        phase === "TECHNICAL_SURVEY" ? "se evaluaba el sistema t\xE9cnico" : null
+      ].filter(Boolean);
+      previousSessionSummary = parts.length > 0 ? `Conversaci\xF3n previa: ${parts.join(", ")}.` : "El cliente ha interactuado previamente con Sof\xEDa.";
     }
     const currentStepInt = this.phaseToStepInt(conv.state.phase);
     const preParsedBill = BillNormalizerService.normalize({
@@ -1027,7 +1437,9 @@ var SofiaFlowOrchestrator = class {
       quoteConsentGiven: conv.state.quoteConsentGiven,
       botDisabled: conv.botDisabled,
       latestUserMessage: messageText,
-      historySummary: conv.messages.slice(-6).map((m) => `${m.sender}: ${m.text}`).join("\n")
+      historySummary: conv.messages.slice(-6).map((m) => `${m.sender}: ${m.text}`).join("\n"),
+      isReturningContext,
+      previousSessionSummary
     };
     const { systemPrompt, userContent } = SofiaPromptBuilder.buildPrompt(promptCtx);
     const rawLlmOutput = await this.llmProvider.complete(
@@ -1039,6 +1451,9 @@ var SofiaFlowOrchestrator = class {
       0.2
     );
     const parsed = SofiaPromptBuilder.parseResponse(rawLlmOutput.text || "");
+    if (parsed.returning_user_greeted) {
+      conv.state.returningUserAcknowledged = true;
+    }
     const mediaSent = [];
     let finalReply = parsed.message_to_user;
     if (parsed.extracted_data) {
@@ -1200,15 +1615,32 @@ ${parsed.message_to_user}`;
         createdAt: (/* @__PURE__ */ new Date()).toISOString()
       };
       await this.leadRepo.save(lead);
-      await this.emailService.sendLeadNotification({
-        leadName: name,
+      const agentRepo = new AgentRepository(this.db);
+      const notificationService = new AgentNotificationService(agentRepo);
+      const agent = await notificationService.getAssignedAgent(conv.tenantId);
+      const prospect = {
+        nombre: name,
         phone,
-        monthlyBill: conv.state.monthlyBill || 0,
-        notes: `Solicitud de atenci\xF3n humana en WhatsApp: ${reason}`
-      });
-      logger.info(`[SofiaFlowOrchestrator] Lead handoff email sent for ${phone}`);
+        montoRecibo: `$${conv.state.monthlyBill || 0} MXN/mes`,
+        sistemaEstimado: conv.state.roofType || "Sistema Residencial",
+        location: conv.state.location,
+        handoffReason: reason,
+        conversationSummary: conv.messages.slice(-4).map((m) => `${m.sender}: ${m.text}`).join("\n")
+      };
+      await notificationService.notify(agent, prospect, conv.tenantId);
+      logger.info(`[SofiaFlowOrchestrator] Lead handoff completed for ${phone} (Assigned Agent: ${agent.name})`);
     } catch (err) {
-      logger.error(`[SofiaFlowOrchestrator] Lead handoff email trigger failed:`, err);
+      logger.error(`[SofiaFlowOrchestrator] Lead handoff failed:`, err);
+      try {
+        await this.emailService.sendLeadNotification({
+          leadName: name,
+          phone,
+          monthlyBill: conv.state.monthlyBill || 0,
+          notes: `Solicitud de atenci\xF3n humana en WhatsApp: ${reason}`
+        });
+      } catch (emailErr) {
+        logger.error(`[SofiaFlowOrchestrator] Fallback email notification also failed:`, emailErr);
+      }
     }
   }
 };
@@ -1216,7 +1648,7 @@ ${parsed.message_to_user}`;
 // server/infrastructure/web/container.ts
 import { getApps as getApps2 } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
-import nodemailer from "nodemailer";
+import nodemailer2 from "nodemailer";
 var quoteEngine = new SolarQuoteEngine();
 var llmProvider = new GroqProvider();
 var emailService = {
@@ -1227,7 +1659,7 @@ var emailService = {
       return true;
     }
     try {
-      const transporter = nodemailer.createTransport({
+      const transporter = nodemailer2.createTransport({
         host: server,
         port,
         secure: port === 465,
@@ -1345,18 +1777,29 @@ function getRepos() {
     leadRepo: new InMemoryLeadRepository()
   };
 }
+var _db = null;
 var _convRepo;
 var _leadRepo;
+var _agentRepo;
 function initRepositories(db2) {
+  _db = db2;
   if (db2) {
     logger.info("[DI] initRepositories: Using Firestore repositories (multi-tenant)");
     _convRepo = new FirestoreConversationRepository(db2);
     _leadRepo = new FirestoreLeadRepository(db2);
+    _agentRepo = new AgentRepository(db2);
   } else {
     logger.warn("[DI] initRepositories: Firestore not available \u2014 using InMemory repositories");
     _convRepo = new InMemoryConversationRepository();
     _leadRepo = new InMemoryLeadRepository();
+    _agentRepo = new AgentRepository(null);
   }
+}
+function getAgentRepo() {
+  if (!_agentRepo) {
+    _agentRepo = new AgentRepository(_db || null);
+  }
+  return _agentRepo;
 }
 function buildReceiveMessageUseCase() {
   const repos = _convRepo && _leadRepo ? { convRepo: _convRepo, leadRepo: _leadRepo } : getRepos();
@@ -1366,7 +1809,8 @@ function buildReceiveMessageUseCase() {
     quoteEngine,
     llmProvider,
     sendWhatsAppMessage,
-    emailService
+    emailService,
+    _db
   );
   return new ReceiveMessageUseCase(
     repos.convRepo,
@@ -1484,6 +1928,75 @@ var AuthService = class {
     const isProd = process.env.NODE_ENV === "production";
     const secureFlag = isProd ? "; Secure" : "";
     return `token=; HttpOnly${secureFlag}; SameSite=Strict; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+  }
+};
+
+// server/infrastructure/services/GoogleAuthService.ts
+function decodeBase64Url(str) {
+  const padded = str.replace(/-/g, "+").replace(/_/g, "/");
+  const pad = padded.length % 4;
+  const padded2 = pad ? padded + "=".repeat(4 - pad) : padded;
+  return Buffer.from(padded2, "base64").toString("utf-8");
+}
+function decodeJwtPayload(token) {
+  try {
+    const parts = token.split(".");
+    if (parts.length !== 3) return null;
+    return JSON.parse(decodeBase64Url(parts[1]));
+  } catch {
+    return null;
+  }
+}
+var GoogleAuthService = class {
+  /**
+   * Verifies a Firebase Google ID Token by checking:
+   * 1. JWT structure and payload decode
+   * 2. Token expiration (exp claim)
+   * 3. Audience matches Firebase project ID
+   * 4. Email is present
+   *
+   * For a demo environment — skips cryptographic signature verification.
+   * For production, enable signature verification via Firebase public keys.
+   */
+  static async verifyGoogleToken(idToken) {
+    if (!idToken || typeof idToken !== "string") return null;
+    try {
+      const payload = decodeJwtPayload(idToken);
+      if (!payload) {
+        logger.warn("[GoogleAuthService] Failed to decode JWT payload");
+        return null;
+      }
+      const now = Math.floor(Date.now() / 1e3);
+      if (payload.exp && payload.exp < now) {
+        logger.warn("[GoogleAuthService] Token has expired");
+        return null;
+      }
+      const projectId = process.env.FIREBASE_PROJECT_ID || "agente-comercial-solar";
+      if (payload.aud && payload.aud !== projectId) {
+        logger.warn("[GoogleAuthService] Token audience mismatch", {
+          expected: projectId,
+          received: payload.aud
+        });
+        return null;
+      }
+      if (!payload.email) {
+        logger.warn("[GoogleAuthService] Token has no email claim");
+        return null;
+      }
+      if (payload.iss && !payload.iss.includes("securetoken.google.com")) {
+        logger.warn("[GoogleAuthService] Token issuer invalid", { iss: payload.iss });
+        return null;
+      }
+      return {
+        uid: payload.sub || payload.user_id || payload.email,
+        email: payload.email,
+        name: payload.name || payload.email.split("@")[0],
+        picture: payload.picture
+      };
+    } catch (err) {
+      logger.warn("[GoogleAuthService] Token verification failed:", err.message);
+      return null;
+    }
   }
 };
 
@@ -1773,6 +2286,34 @@ v2Router.post("/auth/login", authRateLimiter, async (req, res) => {
     user,
     token
     // Optional for external API clients
+  });
+});
+v2Router.post("/auth/google", authRateLimiter, async (req, res) => {
+  const ip = getClientIp(req);
+  const { idToken } = req.body || {};
+  if (!idToken || typeof idToken !== "string") {
+    return res.status(400).json({ error: "Se requiere un ID Token de Google v\xE1lido." });
+  }
+  const googleUser = await GoogleAuthService.verifyGoogleToken(idToken);
+  if (!googleUser) {
+    await RateLimiterService.registerFailedAttempt(ip);
+    return res.status(401).json({ error: "Token de Google inv\xE1lido o expirado." });
+  }
+  await RateLimiterService.resetRateLimit(ip);
+  const user = {
+    id: googleUser.uid,
+    email: googleUser.email,
+    role: "admin"
+    // Demo mode: any Google user gets admin role
+  };
+  const token = AuthService.generateToken(user);
+  const cookieHeader = AuthService.createHttpOnlyCookie(token);
+  res.setHeader("Set-Cookie", cookieHeader);
+  logger.info("[Auth] Successful Google OAuth login", { email: googleUser.email, ip });
+  return res.json({
+    success: true,
+    message: "Inicio de sesi\xF3n con Google exitoso",
+    user
   });
 });
 v2Router.get("/auth/me", requireAuth, (req, res) => {
@@ -2067,6 +2608,104 @@ v2Router.post("/leads/:id/notes", requireAuth, async (req, res) => {
 });
 v2Router.post("/reset-demo", requireAuth, async (req, res) => {
   return res.json({ success: true });
+});
+v2Router.get("/agents", requireAuth, async (req, res) => {
+  try {
+    const tenantId = req.query.tenantId || AppConfig.tenant.defaultId;
+    const agentRepo = getAgentRepo();
+    const agents = await agentRepo.findAll(tenantId);
+    const masked = agents.map((a) => ({
+      ...a,
+      whatsappPhone: a.whatsappPhone ? a.whatsappPhone.length > 4 ? a.whatsappPhone.slice(0, -4).replace(/./g, "*") + a.whatsappPhone.slice(-4) : a.whatsappPhone : ""
+    }));
+    return res.json({ agents: masked });
+  } catch (err) {
+    logger.error("[v2Router] Error in GET /agents", { error: err.message });
+    return res.status(500).json({ error: err.message });
+  }
+});
+v2Router.post("/agents", requireAuth, requireRole(["admin"]), async (req, res) => {
+  try {
+    const { name, email, whatsappPhone } = req.body || {};
+    if (!name || !email) {
+      return res.status(400).json({ error: "name y email son obligatorios" });
+    }
+    const tenantId = req.body.tenantId || AppConfig.tenant.defaultId;
+    const agentRepo = getAgentRepo();
+    const agent = await agentRepo.save({
+      name: String(name).trim(),
+      email: String(email).trim().toLowerCase(),
+      whatsappPhone: String(whatsappPhone || "").trim().replace(/\D/g, ""),
+      tenantId,
+      isActive: true,
+      assignedLeadsCount: 0
+    }, tenantId);
+    await AuditLogService.logEvent({
+      eventType: "AGENT_CREATED",
+      userEmail: req.user.email,
+      userRole: req.user.role,
+      resourceId: agent.id,
+      tenantId,
+      ipAddress: getClientIp(req),
+      details: { agentName: agent.name, agentEmail: agent.email }
+    }).catch((e) => logger.warn("[v2Router] Audit log failed for AGENT_CREATED", { error: e.message }));
+    return res.status(201).json({ success: true, agent });
+  } catch (err) {
+    logger.error("[v2Router] Error in POST /agents", { error: err.message });
+    return res.status(500).json({ error: err.message });
+  }
+});
+v2Router.put("/agents/:agentId", requireAuth, requireRole(["admin"]), async (req, res) => {
+  try {
+    const { agentId } = req.params;
+    const { name, email, whatsappPhone, isActive } = req.body || {};
+    const tenantId = req.body.tenantId || AppConfig.tenant.defaultId;
+    const agentRepo = getAgentRepo();
+    const existing = await agentRepo.findById(tenantId, agentId);
+    if (!existing) return res.status(404).json({ error: "Agente no encontrado" });
+    const updated = await agentRepo.save({
+      ...existing,
+      name: name ? String(name).trim() : existing.name,
+      email: email ? String(email).trim().toLowerCase() : existing.email,
+      whatsappPhone: whatsappPhone !== void 0 && whatsappPhone !== "" ? String(whatsappPhone).trim().replace(/\D/g, "") : existing.whatsappPhone,
+      isActive: isActive !== void 0 ? Boolean(isActive) : existing.isActive
+    }, tenantId);
+    await AuditLogService.logEvent({
+      eventType: "AGENT_UPDATED",
+      userEmail: req.user.email,
+      userRole: req.user.role,
+      resourceId: agentId,
+      tenantId,
+      ipAddress: getClientIp(req),
+      details: { agentName: updated.name, isActive: updated.isActive }
+    }).catch((e) => logger.warn("[v2Router] Audit log failed for AGENT_UPDATED", { error: e.message }));
+    return res.json({ success: true, agent: updated });
+  } catch (err) {
+    logger.error("[v2Router] Error in PUT /agents/:agentId", { error: err.message });
+    return res.status(500).json({ error: err.message });
+  }
+});
+v2Router.delete("/agents/:agentId", requireAuth, requireRole(["admin"]), async (req, res) => {
+  try {
+    const { agentId } = req.params;
+    const tenantId = req.query.tenantId || req.body.tenantId || AppConfig.tenant.defaultId;
+    const agentRepo = getAgentRepo();
+    const deleted = await agentRepo.delete(tenantId, agentId);
+    if (!deleted) return res.status(404).json({ error: "Agente no encontrado" });
+    await AuditLogService.logEvent({
+      eventType: "AGENT_DELETED",
+      userEmail: req.user.email,
+      userRole: req.user.role,
+      resourceId: agentId,
+      tenantId,
+      ipAddress: getClientIp(req),
+      details: { agentId }
+    }).catch((e) => logger.warn("[v2Router] Audit log failed for AGENT_DELETED", { error: e.message }));
+    return res.json({ success: true });
+  } catch (err) {
+    logger.error("[v2Router] Error in DELETE /agents/:agentId", { error: err.message });
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 // server/infrastructure/ai/LLMProvider.ts
