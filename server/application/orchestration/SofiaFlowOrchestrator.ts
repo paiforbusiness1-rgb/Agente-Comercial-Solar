@@ -58,9 +58,15 @@ export class SofiaFlowOrchestrator {
     if (!conv.state.completedSteps) conv.state.completedSteps = [];
     if (!conv.state.mediaSentFlags) conv.state.mediaSentFlags = {};
 
-    // Update name if provided explicitly from WhatsApp profile
-    if (userName && userName !== 'Cliente' && conv.nombre === 'Cliente') {
-      conv.nombre = userName;
+    // Refinamiento 1: Sanitización Defensiva del pushname de WhatsApp (Regla 6: SSD & Regla 4: U-First)
+    const isGenericPushname = /grupo|empresa|negocio|familia|casa|sertei|solar|oficina/i.test(userName || '');
+    const safeUserName = isGenericPushname || !userName ? 'Cliente' : userName;
+    conv.state.whatsappProfileName = userName;
+
+    // Solo actualizar conv.nombre si es un nombre seguro no genérico Y conv.nombre era 'Cliente'
+    // Si es genérico, conv.nombre permanece 'Cliente' obligando a preguntar el nombre humano
+    if (conv.nombre === 'Cliente' && safeUserName !== 'Cliente') {
+      (conv.state as any).suggestedName = safeUserName;
     }
 
     // If bot is disabled (Human Handoff Active), do not intervene automatically
@@ -134,6 +140,8 @@ export class SofiaFlowOrchestrator {
         billAmount: conv.state.monthlyBill,
         billFrequency: conv.state.billFrequency,
         roofType: conv.state.roofType,
+        hasShade: conv.state.hasShade,
+        shadowsAssessed: conv.state.shadowsAssessed,
         meterDistance: (conv.state as any).meterDistance,
         extraLoads: (conv.state as any).extraLoads,
         location: (conv.state as any).location,
@@ -142,6 +150,8 @@ export class SofiaFlowOrchestrator {
       calculatedQuote: calculatedQuoteInfo,
       quoteConsentRequested: conv.state.quoteConsentRequested,
       quoteConsentGiven: conv.state.quoteConsentGiven,
+      financingConsentRequested: conv.state.financingConsentRequested,
+      financingConsentGiven: conv.state.financingConsentGiven,
       botDisabled: conv.botDisabled,
       latestUserMessage: messageText,
       historySummary: conv.messages.slice(-6).map(m => `${m.sender}: ${m.text}`).join('\n'),
@@ -201,6 +211,26 @@ export class SofiaFlowOrchestrator {
       if (parsed.extracted_data.roof_type) {
         conv.state.roofType = parsed.extracted_data.roof_type;
       }
+      if (parsed.extracted_data.shadows_status) {
+        if (parsed.extracted_data.shadows_status === 'none') {
+          conv.state.hasShade = false;
+          conv.state.shadowsAssessed = true;
+          conv.state.shadows_assessed = true;
+        } else if (parsed.extracted_data.shadows_status === 'present') {
+          conv.state.hasShade = true;
+          conv.state.shadowsAssessed = true;
+          conv.state.shadows_assessed = true;
+        } else if (parsed.extracted_data.shadows_status === 'unknown') {
+          if (conv.state.shadowsAssessed !== true) {
+            conv.state.shadowsAssessed = false;
+            conv.state.shadows_assessed = false;
+          }
+        }
+      } else if (parsed.extracted_data.has_shade !== undefined && parsed.extracted_data.has_shade !== null) {
+        conv.state.hasShade = Boolean(parsed.extracted_data.has_shade);
+        conv.state.shadowsAssessed = true;
+        conv.state.shadows_assessed = true;
+      }
       if (parsed.extracted_data.ownership) {
         conv.state.isOwner = parsed.extracted_data.ownership.toLowerCase().includes('propi') || parsed.extracted_data.ownership.toLowerCase().includes('propia');
       }
@@ -229,15 +259,25 @@ export class SofiaFlowOrchestrator {
       conv.state.technicalVisitProposed = true;
     }
 
-    // Generate & Attach Quote ONLY if consent has been given AND quote not yet sent
+    // Refinamiento 2: Completitud Técnica Dirigida por Estado (Sombras en Paso 3)
+    let effectiveNextStep = parsed.next_step;
+    if (conv.state.roofType && conv.state.shadowsAssessed !== true && effectiveNextStep >= 4) {
+      effectiveNextStep = 3;
+      const asksAboutShades = /(?:sombra|tinaco|árbol|arbol|edificio|muro|obstrucci[oó]n)/i.test(finalReply);
+      if (!asksAboutShades) {
+        finalReply = `¡Excelente, techo de ${conv.state.roofType}! 🏢 Y respecto a posibles sombras de árboles, tinacos o construcciones vecinas, ¿hay alguna que le dé a tu techo durante el día?`;
+      }
+    }
+
+    // Generate & Attach Quote ONLY if consent has been given AND quote not yet sent AND step is at least 4
     const isQuoteNotYetSent = !conv.state.completedSteps.includes('QUOTE_SENT');
 
-    if (conv.state.quoteConsentGiven && isQuoteNotYetSent && conv.state.monthlyBill) {
+    if (conv.state.quoteConsentGiven && isQuoteNotYetSent && conv.state.monthlyBill && effectiveNextStep >= 4) {
       const bill = conv.state.monthlyBill;
       const calcResult = this.quoteEngine.calculate(bill, (conv.state as any).extraLoads);
 
       const quoteDto = {
-        clientName: conv.nombre || userName || 'Cliente',
+        clientName: conv.nombre && conv.nombre !== 'Cliente' ? conv.nombre : ((conv.state as any).whatsappProfileName || 'Cliente'),
         clientPhone: phone,
         monthlyBillMxn: bill,
         panelsCount: calcResult.panels,
@@ -256,7 +296,7 @@ export class SofiaFlowOrchestrator {
 
     // 6. Idempotent Media Dispatch (Anti-Spam)
     // Instalación Profesional (Step 2/3)
-    const shouldSendInstalacion = (parsed.media_to_send === 'INSTALACION_PROFESIONAL' || parsed.next_step === 2 || parsed.next_step === 3) &&
+    const shouldSendInstalacion = (parsed.media_to_send === 'INSTALACION_PROFESIONAL' || effectiveNextStep === 2 || effectiveNextStep === 3) &&
                                   !conv.state.mediaSentFlags.instalacionProfessional;
     if (shouldSendInstalacion) {
       const imgUrl = `${AppConfig.mediaBaseUrl}/INSTALACION_PROFESIONAL.jpeg`;
@@ -270,8 +310,19 @@ export class SofiaFlowOrchestrator {
       }
     }
 
-    // Financiamiento (Step 4/5)
-    const shouldSendFinanciamiento = (parsed.media_to_send === 'FINANCIAMIENTO' || (conv.state.quoteConsentGiven && parsed.next_step >= 4)) &&
+    // Consent Gating Logic for Financing (Step 5) - Refinamiento 3
+    const wasFinancingRequested = conv.state.financingConsentRequested;
+    if (parsed.financing_consent_requested || parsed.propose_financing) {
+      conv.state.financingConsentRequested = true;
+    }
+
+    if (parsed.financing_consent_given || (wasFinancingRequested && explicitAffirmative)) {
+      conv.state.financingConsentGiven = true;
+    }
+
+    // Financiamiento (Step 5) — Gating Estricto con Consentimiento (Cero Spam)
+    const shouldSendFinanciamiento = (parsed.media_to_send === 'FINANCIAMIENTO' || parsed.propose_financing) &&
+                                    conv.state.financingConsentGiven === true &&
                                     !conv.state.mediaSentFlags.financiamiento;
     if (shouldSendFinanciamiento) {
       const imgUrl = `${AppConfig.mediaBaseUrl}/FINANCIAMIENTO.jpeg`;
@@ -294,16 +345,23 @@ export class SofiaFlowOrchestrator {
       // Save lead and alert sales team via email
       await this.triggerLeadHandoff(conv, phone, userName || conv.nombre, parsed.handoff_reason || 'Solicitud de cliente');
     } else {
-      conv.state.phase = this.stepIntToPhase(parsed.next_step);
+      conv.state.phase = this.stepIntToPhase(effectiveNextStep);
     }
 
     // Append messages to conversation history
     conv.messages.push({ sender: 'user', text: messageText, timestamp: new Date().toISOString() });
     conv.messages.push({ sender: 'bot', text: finalReply, timestamp: new Date().toISOString() });
-    if (mediaSent.length > 0) {
+    if (mediaSent.some(m => m.includes('INSTALACION_PROFESIONAL'))) {
       conv.messages.push({
         sender: 'bot',
         text: '📄 [Brochure Enviado]: Información detallada de servicios e instalación profesional',
+        timestamp: new Date().toISOString(),
+      });
+    }
+    if (mediaSent.some(m => m.includes('FINANCIAMIENTO'))) {
+      conv.messages.push({
+        sender: 'bot',
+        text: '📄 [Brochure Enviado]: Planes y requisitos de financiamiento solar',
         timestamp: new Date().toISOString(),
       });
     }
@@ -314,7 +372,7 @@ export class SofiaFlowOrchestrator {
 
     return {
       replyText: finalReply,
-      nextStep: parsed.next_step,
+      nextStep: effectiveNextStep,
       botDisabled: conv.botDisabled,
       mediaSent: mediaSent.length > 0 ? mediaSent : undefined,
     };

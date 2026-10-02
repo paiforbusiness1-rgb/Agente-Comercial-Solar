@@ -647,28 +647,32 @@ EJEMPLO DE BIENVENIDA IDEAL:
 
 REGLAS ESENCIALES DE INTERACCI\xD3N Y CERO ALUCINACI\xD3N:
 
-1. MANEJO GRACEFUL DEL NOMBRE (PASO 1):
-   - Si el cliente menciona su nombre en el mensaje inicial (ej. "Hola soy Carlos y pago $2,800 de luz"), extr\xE1elo en "client_name": "Carlos" y sal\xFAdalo por su nombre de inmediato.
-   - Si el cliente NO da su nombre (es decir, el nombre actual es "Cliente"), sal\xFAdalo c\xE1lidamente y solic\xEDtale su nombre de forma amable, pero NUNCA ignores los otros datos que ya te haya dado.
+1. MANEJO DEL NOMBRE HUMANO DEL CLIENTE (PASO 1):
+   - Si <name>Cliente</name> (es decir, el nombre de pila no ha sido proporcionado por el usuario en texto):
+     Sof\xEDa DEBE solicitar amablemente su nombre en su saludo inicial para dirigirse a \xE9l con cercan\xEDa y respeto:
+     "\xA1Hola! Bienvenido a O3 Energy M\xE9xico \u2600\uFE0F Soy Sof\xEDa, asesora comercial. Con gusto te ayudo a dise\xF1ar tu soluci\xF3n solar. Para brindarte una atenci\xF3n personalizada, \xBFcon qui\xE9n tengo el gusto?"
+     Si el usuario ya indic\xF3 alg\xFAn dato t\xE9cnico o de recibo en su primer mensaje, acusa recibo amablemente pero pide su nombre.
+   - NUNCA asumas o inventes nombres comerciales (como grupos, negocios, empresas o apodos).
+   - Cuando el usuario mencione su nombre en el chat (ej. "Me llamo H\xE9ctor", "Soy Carlos", "H\xE9ctor"), extr\xE1elo en "client_name": "H\xE9ctor" y dir\xEDgete a \xE9l por su nombre en los turnos subsecuentes.
 
 2. CERO ALUCINACI\xD3N DE PANELES Y N\xDAMEROS (FUENTE \xDANICA DE LA VERDAD):
    - NUNCA inventes o menciones una cantidad de paneles solares o montos si NO dispones de los valores calculados en <calculated_quote>.
    - Si <calculated_quote> contiene datos, utiliza EXCLUSIVAMENTE esa cifra de paneles (ej. si indica 4 paneles, menciona 4 paneles; si indica 6 paneles, menciona 6 paneles).
    - Si el usuario pregunta cu\xE1ntos paneles necesita ANTES de indicar su recibo, responde con elegancia: "Para darte el n\xFAmero exacto de paneles y el costo de tu inversi\xF3n, necesito conocer tu consumo mensual o bimestral en pesos de tu recibo CFE. \xBFCu\xE1nto pagas aproximadamente?" NUNCA inventes un n\xFAmero de paneles.
 
-3. CONVERSI\xD3N Y DESGLOSE TRANSPARENTE DE RECI BOS CFE (BIMESTRAL VS. MENSUAL):
+3. CONVERSI\xD3N Y DESGLOSE TRANSPARENTE DE RECIBOS CFE (BIMESTRAL VS. MENSUAL):
    - En M\xE9xico los recibos CFE son habitualmente BIMESTRALES.
    - Si el usuario menciona un monto (ej. $2,800) y no aclara frecuencia, o si dice "bimestral", extrae "bill_frequency": "bimestral".
    - Al responder, desglosa SIEMPRE de forma clara y transparente la equivalencia: "Tu recibo bimestral de $2,800 MXN equivale a $1,400 MXN al mes. Con este consumo, tu sistema ideal es de [N de <calculated_quote>] paneles solares...".
 
 4. GATING DE CONSENTIMIENTO PARA COTIZACI\xD3N (PASO 4):
-   - Al contar con el recibo y tipo de techo, no muestres la cotizaci\xF3n masiva directamente de golpe.
+   - Al contar con el recibo, tipo de techo y validaci\xF3n de sombras, no muestres la cotizaci\xF3n masiva directamente de golpe.
    - Haz una pregunta de abreboca ofreciendo la cotizaci\xF3n:
      "\xA1Excelente [Nombre]! Con un consumo de $[Monto], tu sistema ideal es de aproximadamente [N] paneles solares de alta eficiencia. \xBFTe gustar\xEDa que te presente la propuesta preliminar de inversi\xF3n y ahorro estimado?"
    - Si el cliente responde afirmativamente ("S\xED", "Adelante", "Por favor", "Mu\xE9stramela"), establece "quote_consent_given": true.
 
-5. PROPUESTA PROACTIVA DE VISITA T\xC9CNICA GRATUITA EN SITIO:
-   - Si el usuario no tiene la foto del recibo a la mano ("No la tengo a la mano") o al avanzar en la calificaci\xF3n del techo/sombras (Pasos 3 y 4), ofrece proactivamente una Visita T\xE9cnica Gratuita en Sitio por nuestros ingenieros certificados para evaluar la estructura, sombras y trayectoria el\xE9ctrica. Establece "propose_technical_visit": true. El bot PERMANECE ACTIVO (botDisabled = false).
+5. PROPUESTA PROACTIVA DE VISITA T\xC9CNICA GRATUITA EN SITIO (PASO 6):
+   - Si el usuario no tiene la foto del recibo a la mano ("No la tengo a la mano") o tras haber revisado la cotizaci\xF3n y financiamiento (Paso 6), ofrece proactivamente una Visita T\xE9cnica Gratuita en Sitio por nuestros ingenieros certificados para evaluar la estructura, sombras y trayectoria el\xE9ctrica in situ. Establece "propose_technical_visit": true. El bot PERMANECE ACTIVO (botDisabled = false).
 
 6. CANALIZACI\xD3N CON ASESOR COMERCIAL ESPECIALIZADO:
    - Si el usuario solicita hablar con una persona, requiere asesor\xEDa personalizada avanzada o pide la llamada de un especialista, establece "trigger_human_handoff": true, "propose_advisor_handoff": true y "handoff_reason": "Solicitud de atenci\xF3n humana".
@@ -684,6 +688,35 @@ REGLAS ESENCIALES DE INTERACCI\xD3N Y CERO ALUCINACI\xD3N:
      "media_to_send": "INSTALACION_PROFESIONAL"
      "next_step": 2
 
+9. COMPLETITUD T\xC9CNICA EN PASO 3 (TECHO Y SOMBRAS):
+   - En el Paso 3, se eval\xFAan DOS aspectos t\xE9cnicos indispensables: el tipo de techo (concreto, l\xE1mina, teja) y la presencia de sombras (\xE1rboles, tinacos, muros altos o edificios vecinos).
+   - Si el usuario responde sobre el tipo de techo pero omite indicar si tiene sombras (o si shadows_status es "unknown"):
+     ESTRICTAMENTE PROHIBIDO avanzar al Paso 4 de cotizaci\xF3n.
+     Mant\xE9n obligatoriamente "next_step": 3.
+     Agradece el dato del tipo de techo y pregunta amablemente sobre las sombras:
+     "\xA1Excelente, techo de [tipo]! \u{1F3E2} Y respecto a posibles sombras de \xE1rboles, tinacos o construcciones vecinas, \xBFhay alguna que le d\xE9 a tu techo durante el d\xEDa?"
+   - Extrae obligatoriamente:
+     - "roof_type": tipo de techo indicado.
+     - "shadows_status": "none" (sin sombras / despejado), "present" (hay sombras), o "unknown" (no mencionado/pendiente).
+     - "has_shade": false si es "none", true si es "present", null si es "unknown".
+
+10. OFRECIMIENTO Y GATING DE CONSENTIMIENTO PARA FINANCIAMIENTO (PASO 5 - U-FIRST UX):
+   - Tras entregar la cotizaci\xF3n preliminar (Paso 4):
+     ESTRICTAMENTE PROHIBIDO enviar el brochure de financiamiento de forma autom\xE1tica o prematura.
+     Sof\xEDa debe ofrecer primero las opciones de financiamiento y preguntar amablemente al cliente si desea conocerlas:
+     "Adem\xE1s de la inversi\xF3n de contado, contamos con atractivos planes de financiamiento con los que tu sistema se paga pr\xE1cticamente con el mismo ahorro que generas en tu recibo de CFE. \u{1F4B3}\u2600\uFE0F \xBFTe gustar\xEDa que te comparta nuestras opciones y requisitos de financiamiento?"
+     Establece obligatoriamente en tu respuesta JSON:
+     "propose_financing": true,
+     "financing_consent_requested": true,
+     "financing_consent_given": false,
+     "media_to_send": null,
+     "next_step": 5
+   - Confirmaci\xF3n del Usuario (Paso 5):
+     - Si el usuario responde afirmativamente ("S\xED", "Me interesa", "Por favor", "A ver", "Cu\xE1les son"):
+       Establece "financing_consent_given": true, "media_to_send": "FINANCIAMIENTO", y env\xEDa un mensaje introductorio c\xE1lido.
+     - Si el usuario indica que prefiere pago de contado o no le interesa el financiamiento ("Prefiero de contado", "No gracias"):
+       Establece "financing_consent_given": false, "media_to_send": null, respeta su preferencia con elegancia y avanza hacia la Visita T\xE9cnica Gratuita (Paso 6).
+
 ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
 {
   "next_step": number, // Paso actual (1 a 6)
@@ -693,6 +726,8 @@ ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
     "bill_amount": number | null,
     "bill_frequency": "bimestral" | "mensual" | null,
     "roof_type": string | null,
+    "has_shade": boolean | null,
+    "shadows_status": "none" | "present" | "unknown",
     "meter_distance": string | null,
     "extra_loads": string | null,
     "location": string | null,
@@ -700,6 +735,9 @@ ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
   },
   "quote_consent_requested": boolean,
   "quote_consent_given": boolean,
+  "propose_financing": boolean,
+  "financing_consent_requested": boolean,
+  "financing_consent_given": boolean,
   "propose_technical_visit": boolean,
   "propose_advisor_handoff": boolean,
   "trigger_human_handoff": boolean,
@@ -721,6 +759,10 @@ ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
     <previous_session_summary>${ctx.previousSessionSummary ? this.sanitizeInput(ctx.previousSessionSummary) : "Sin sesi\xF3n previa"}</previous_session_summary>
     <quote_consent_requested>${Boolean(ctx.quoteConsentRequested)}</quote_consent_requested>
     <quote_consent_given>${Boolean(ctx.quoteConsentGiven)}</quote_consent_given>
+    <financing_consent_requested>${Boolean(ctx.financingConsentRequested)}</financing_consent_requested>
+    <financing_consent_given>${Boolean(ctx.financingConsentGiven)}</financing_consent_given>
+    <shadows_assessed>${Boolean(ctx.extractedData?.shadowsAssessed)}</shadows_assessed>
+    <has_shade>${ctx.extractedData?.hasShade !== void 0 ? ctx.extractedData.hasShade : "desconocido"}</has_shade>
     <bot_disabled>${ctx.botDisabled}</bot_disabled>
     <data_collected>${JSON.stringify(ctx.extractedData)}</data_collected>
   </current_state>
@@ -745,9 +787,16 @@ ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
       return {
         next_step: typeof parsed.next_step === "number" ? parsed.next_step : 1,
         message_to_user: parsed.message_to_user || "Hola, \xBFen qu\xE9 puedo ayudarte hoy?",
-        extracted_data: parsed.extracted_data || {},
+        extracted_data: {
+          ...parsed.extracted_data,
+          shadows_status: parsed.extracted_data?.shadows_status || (parsed.extracted_data?.has_shade === false ? "none" : parsed.extracted_data?.has_shade === true ? "present" : void 0),
+          has_shade: parsed.extracted_data?.has_shade !== void 0 ? parsed.extracted_data.has_shade : parsed.extracted_data?.shadows_status === "none" ? false : parsed.extracted_data?.shadows_status === "present" ? true : null
+        },
         quote_consent_requested: Boolean(parsed.quote_consent_requested),
         quote_consent_given: Boolean(parsed.quote_consent_given),
+        propose_financing: Boolean(parsed.propose_financing),
+        financing_consent_requested: Boolean(parsed.financing_consent_requested),
+        financing_consent_given: Boolean(parsed.financing_consent_given),
         propose_technical_visit: Boolean(parsed.propose_technical_visit),
         propose_advisor_handoff: Boolean(parsed.propose_advisor_handoff),
         trigger_human_handoff: Boolean(parsed.trigger_human_handoff),
@@ -1395,8 +1444,11 @@ var SofiaFlowOrchestrator = class {
     const conv = await this.conversationRepo.findByPhone(tenantId, phone);
     if (!conv.state.completedSteps) conv.state.completedSteps = [];
     if (!conv.state.mediaSentFlags) conv.state.mediaSentFlags = {};
-    if (userName && userName !== "Cliente" && conv.nombre === "Cliente") {
-      conv.nombre = userName;
+    const isGenericPushname = /grupo|empresa|negocio|familia|casa|sertei|solar|oficina/i.test(userName || "");
+    const safeUserName = isGenericPushname || !userName ? "Cliente" : userName;
+    conv.state.whatsappProfileName = userName;
+    if (conv.nombre === "Cliente" && safeUserName !== "Cliente") {
+      conv.state.suggestedName = safeUserName;
     }
     if (conv.botDisabled) {
       logger.info(`[SofiaFlowOrchestrator] Bot disabled for ${phone}. Skipping automated response.`);
@@ -1447,6 +1499,8 @@ var SofiaFlowOrchestrator = class {
         billAmount: conv.state.monthlyBill,
         billFrequency: conv.state.billFrequency,
         roofType: conv.state.roofType,
+        hasShade: conv.state.hasShade,
+        shadowsAssessed: conv.state.shadowsAssessed,
         meterDistance: conv.state.meterDistance,
         extraLoads: conv.state.extraLoads,
         location: conv.state.location,
@@ -1455,6 +1509,8 @@ var SofiaFlowOrchestrator = class {
       calculatedQuote: calculatedQuoteInfo,
       quoteConsentRequested: conv.state.quoteConsentRequested,
       quoteConsentGiven: conv.state.quoteConsentGiven,
+      financingConsentRequested: conv.state.financingConsentRequested,
+      financingConsentGiven: conv.state.financingConsentGiven,
       botDisabled: conv.botDisabled,
       latestUserMessage: messageText,
       historySummary: conv.messages.slice(-6).map((m) => `${m.sender}: ${m.text}`).join("\n"),
@@ -1500,6 +1556,26 @@ var SofiaFlowOrchestrator = class {
       if (parsed.extracted_data.roof_type) {
         conv.state.roofType = parsed.extracted_data.roof_type;
       }
+      if (parsed.extracted_data.shadows_status) {
+        if (parsed.extracted_data.shadows_status === "none") {
+          conv.state.hasShade = false;
+          conv.state.shadowsAssessed = true;
+          conv.state.shadows_assessed = true;
+        } else if (parsed.extracted_data.shadows_status === "present") {
+          conv.state.hasShade = true;
+          conv.state.shadowsAssessed = true;
+          conv.state.shadows_assessed = true;
+        } else if (parsed.extracted_data.shadows_status === "unknown") {
+          if (conv.state.shadowsAssessed !== true) {
+            conv.state.shadowsAssessed = false;
+            conv.state.shadows_assessed = false;
+          }
+        }
+      } else if (parsed.extracted_data.has_shade !== void 0 && parsed.extracted_data.has_shade !== null) {
+        conv.state.hasShade = Boolean(parsed.extracted_data.has_shade);
+        conv.state.shadowsAssessed = true;
+        conv.state.shadows_assessed = true;
+      }
       if (parsed.extracted_data.ownership) {
         conv.state.isOwner = parsed.extracted_data.ownership.toLowerCase().includes("propi") || parsed.extracted_data.ownership.toLowerCase().includes("propia");
       }
@@ -1521,12 +1597,20 @@ var SofiaFlowOrchestrator = class {
     if (parsed.propose_technical_visit) {
       conv.state.technicalVisitProposed = true;
     }
+    let effectiveNextStep = parsed.next_step;
+    if (conv.state.roofType && conv.state.shadowsAssessed !== true && effectiveNextStep >= 4) {
+      effectiveNextStep = 3;
+      const asksAboutShades = /(?:sombra|tinaco|árbol|arbol|edificio|muro|obstrucci[oó]n)/i.test(finalReply);
+      if (!asksAboutShades) {
+        finalReply = `\xA1Excelente, techo de ${conv.state.roofType}! \u{1F3E2} Y respecto a posibles sombras de \xE1rboles, tinacos o construcciones vecinas, \xBFhay alguna que le d\xE9 a tu techo durante el d\xEDa?`;
+      }
+    }
     const isQuoteNotYetSent = !conv.state.completedSteps.includes("QUOTE_SENT");
-    if (conv.state.quoteConsentGiven && isQuoteNotYetSent && conv.state.monthlyBill) {
+    if (conv.state.quoteConsentGiven && isQuoteNotYetSent && conv.state.monthlyBill && effectiveNextStep >= 4) {
       const bill = conv.state.monthlyBill;
       const calcResult = this.quoteEngine.calculate(bill, conv.state.extraLoads);
       const quoteDto = {
-        clientName: conv.nombre || userName || "Cliente",
+        clientName: conv.nombre && conv.nombre !== "Cliente" ? conv.nombre : conv.state.whatsappProfileName || "Cliente",
         clientPhone: phone,
         monthlyBillMxn: bill,
         panelsCount: calcResult.panels,
@@ -1543,7 +1627,7 @@ var SofiaFlowOrchestrator = class {
 ${parsed.message_to_user}`;
       conv.state.completedSteps.push("QUOTE_SENT");
     }
-    const shouldSendInstalacion = (parsed.media_to_send === "INSTALACION_PROFESIONAL" || parsed.next_step === 2 || parsed.next_step === 3) && !conv.state.mediaSentFlags.instalacionProfessional;
+    const shouldSendInstalacion = (parsed.media_to_send === "INSTALACION_PROFESIONAL" || effectiveNextStep === 2 || effectiveNextStep === 3) && !conv.state.mediaSentFlags.instalacionProfessional;
     if (shouldSendInstalacion) {
       const imgUrl = `${AppConfig.mediaBaseUrl}/INSTALACION_PROFESIONAL.jpeg`;
       mediaSent.push(imgUrl);
@@ -1555,7 +1639,14 @@ ${parsed.message_to_user}`;
 Mientras me pasas el dato, te comparto informaci\xF3n detallada de nuestro servicio. \u{1F4C4}\u2600\uFE0F`;
       }
     }
-    const shouldSendFinanciamiento = (parsed.media_to_send === "FINANCIAMIENTO" || conv.state.quoteConsentGiven && parsed.next_step >= 4) && !conv.state.mediaSentFlags.financiamiento;
+    const wasFinancingRequested = conv.state.financingConsentRequested;
+    if (parsed.financing_consent_requested || parsed.propose_financing) {
+      conv.state.financingConsentRequested = true;
+    }
+    if (parsed.financing_consent_given || wasFinancingRequested && explicitAffirmative) {
+      conv.state.financingConsentGiven = true;
+    }
+    const shouldSendFinanciamiento = (parsed.media_to_send === "FINANCIAMIENTO" || parsed.propose_financing) && conv.state.financingConsentGiven === true && !conv.state.mediaSentFlags.financiamiento;
     if (shouldSendFinanciamiento) {
       const imgUrl = `${AppConfig.mediaBaseUrl}/FINANCIAMIENTO.jpeg`;
       mediaSent.push(imgUrl);
@@ -1574,14 +1665,21 @@ Mientras me pasas el dato, te comparto informaci\xF3n detallada de nuestro servi
 \xA1Que tengas un excelente d\xEDa!`;
       await this.triggerLeadHandoff(conv, phone, userName || conv.nombre, parsed.handoff_reason || "Solicitud de cliente");
     } else {
-      conv.state.phase = this.stepIntToPhase(parsed.next_step);
+      conv.state.phase = this.stepIntToPhase(effectiveNextStep);
     }
     conv.messages.push({ sender: "user", text: messageText, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
     conv.messages.push({ sender: "bot", text: finalReply, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
-    if (mediaSent.length > 0) {
+    if (mediaSent.some((m) => m.includes("INSTALACION_PROFESIONAL"))) {
       conv.messages.push({
         sender: "bot",
         text: "\u{1F4C4} [Brochure Enviado]: Informaci\xF3n detallada de servicios e instalaci\xF3n profesional",
+        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+      });
+    }
+    if (mediaSent.some((m) => m.includes("FINANCIAMIENTO"))) {
+      conv.messages.push({
+        sender: "bot",
+        text: "\u{1F4C4} [Brochure Enviado]: Planes y requisitos de financiamiento solar",
         timestamp: (/* @__PURE__ */ new Date()).toISOString()
       });
     }
@@ -1589,7 +1687,7 @@ Mientras me pasas el dato, te comparto informaci\xF3n detallada de nuestro servi
     await this.conversationRepo.save(conv);
     return {
       replyText: finalReply,
-      nextStep: parsed.next_step,
+      nextStep: effectiveNextStep,
       botDisabled: conv.botDisabled,
       mediaSent: mediaSent.length > 0 ? mediaSent : void 0
     };

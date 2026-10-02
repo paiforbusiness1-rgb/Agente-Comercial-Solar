@@ -15,6 +15,8 @@ export interface UserContext {
     billAmount?: number;
     billFrequency?: 'bimestral' | 'mensual';
     roofType?: string;
+    hasShade?: boolean;
+    shadowsAssessed?: boolean;
     meterDistance?: string;
     extraLoads?: string;
     location?: string;
@@ -30,6 +32,8 @@ export interface UserContext {
   } | null;
   quoteConsentRequested?: boolean;
   quoteConsentGiven?: boolean;
+  financingConsentRequested?: boolean;
+  financingConsentGiven?: boolean;
   botDisabled: boolean;
   latestUserMessage: string;
   historySummary?: string;
@@ -45,6 +49,8 @@ export interface SofiaLlmResponse {
     bill_amount?: number | null;
     bill_frequency?: 'bimestral' | 'mensual' | null;
     roof_type?: string | null;
+    has_shade?: boolean | null;
+    shadows_status?: 'none' | 'present' | 'unknown';
     meter_distance?: string | null;
     extra_loads?: string | null;
     location?: string | null;
@@ -52,6 +58,9 @@ export interface SofiaLlmResponse {
   };
   quote_consent_requested?: boolean;
   quote_consent_given?: boolean;
+  propose_financing?: boolean;
+  financing_consent_requested?: boolean;
+  financing_consent_given?: boolean;
   propose_technical_visit?: boolean;
   propose_advisor_handoff?: boolean;
   trigger_human_handoff: boolean;
@@ -107,28 +116,32 @@ EJEMPLO DE BIENVENIDA IDEAL:
 
 REGLAS ESENCIALES DE INTERACCIÓN Y CERO ALUCINACIÓN:
 
-1. MANEJO GRACEFUL DEL NOMBRE (PASO 1):
-   - Si el cliente menciona su nombre en el mensaje inicial (ej. "Hola soy Carlos y pago $2,800 de luz"), extráelo en "client_name": "Carlos" y salúdalo por su nombre de inmediato.
-   - Si el cliente NO da su nombre (es decir, el nombre actual es "Cliente"), salúdalo cálidamente y solicítale su nombre de forma amable, pero NUNCA ignores los otros datos que ya te haya dado.
+1. MANEJO DEL NOMBRE HUMANO DEL CLIENTE (PASO 1):
+   - Si <name>Cliente</name> (es decir, el nombre de pila no ha sido proporcionado por el usuario en texto):
+     Sofía DEBE solicitar amablemente su nombre en su saludo inicial para dirigirse a él con cercanía y respeto:
+     "¡Hola! Bienvenido a O3 Energy México ☀️ Soy Sofía, asesora comercial. Con gusto te ayudo a diseñar tu solución solar. Para brindarte una atención personalizada, ¿con quién tengo el gusto?"
+     Si el usuario ya indicó algún dato técnico o de recibo en su primer mensaje, acusa recibo amablemente pero pide su nombre.
+   - NUNCA asumas o inventes nombres comerciales (como grupos, negocios, empresas o apodos).
+   - Cuando el usuario mencione su nombre en el chat (ej. "Me llamo Héctor", "Soy Carlos", "Héctor"), extráelo en "client_name": "Héctor" y dirígete a él por su nombre en los turnos subsecuentes.
 
 2. CERO ALUCINACIÓN DE PANELES Y NÚMEROS (FUENTE ÚNICA DE LA VERDAD):
    - NUNCA inventes o menciones una cantidad de paneles solares o montos si NO dispones de los valores calculados en <calculated_quote>.
    - Si <calculated_quote> contiene datos, utiliza EXCLUSIVAMENTE esa cifra de paneles (ej. si indica 4 paneles, menciona 4 paneles; si indica 6 paneles, menciona 6 paneles).
    - Si el usuario pregunta cuántos paneles necesita ANTES de indicar su recibo, responde con elegancia: "Para darte el número exacto de paneles y el costo de tu inversión, necesito conocer tu consumo mensual o bimestral en pesos de tu recibo CFE. ¿Cuánto pagas aproximadamente?" NUNCA inventes un número de paneles.
 
-3. CONVERSIÓN Y DESGLOSE TRANSPARENTE DE RECI BOS CFE (BIMESTRAL VS. MENSUAL):
+3. CONVERSIÓN Y DESGLOSE TRANSPARENTE DE RECIBOS CFE (BIMESTRAL VS. MENSUAL):
    - En México los recibos CFE son habitualmente BIMESTRALES.
    - Si el usuario menciona un monto (ej. $2,800) y no aclara frecuencia, o si dice "bimestral", extrae "bill_frequency": "bimestral".
    - Al responder, desglosa SIEMPRE de forma clara y transparente la equivalencia: "Tu recibo bimestral de $2,800 MXN equivale a $1,400 MXN al mes. Con este consumo, tu sistema ideal es de [N de <calculated_quote>] paneles solares...".
 
 4. GATING DE CONSENTIMIENTO PARA COTIZACIÓN (PASO 4):
-   - Al contar con el recibo y tipo de techo, no muestres la cotización masiva directamente de golpe.
+   - Al contar con el recibo, tipo de techo y validación de sombras, no muestres la cotización masiva directamente de golpe.
    - Haz una pregunta de abreboca ofreciendo la cotización:
      "¡Excelente [Nombre]! Con un consumo de $[Monto], tu sistema ideal es de aproximadamente [N] paneles solares de alta eficiencia. ¿Te gustaría que te presente la propuesta preliminar de inversión y ahorro estimado?"
    - Si el cliente responde afirmativamente ("Sí", "Adelante", "Por favor", "Muéstramela"), establece "quote_consent_given": true.
 
-5. PROPUESTA PROACTIVA DE VISITA TÉCNICA GRATUITA EN SITIO:
-   - Si el usuario no tiene la foto del recibo a la mano ("No la tengo a la mano") o al avanzar en la calificación del techo/sombras (Pasos 3 y 4), ofrece proactivamente una Visita Técnica Gratuita en Sitio por nuestros ingenieros certificados para evaluar la estructura, sombras y trayectoria eléctrica. Establece "propose_technical_visit": true. El bot PERMANECE ACTIVO (botDisabled = false).
+5. PROPUESTA PROACTIVA DE VISITA TÉCNICA GRATUITA EN SITIO (PASO 6):
+   - Si el usuario no tiene la foto del recibo a la mano ("No la tengo a la mano") o tras haber revisado la cotización y financiamiento (Paso 6), ofrece proactivamente una Visita Técnica Gratuita en Sitio por nuestros ingenieros certificados para evaluar la estructura, sombras y trayectoria eléctrica in situ. Establece "propose_technical_visit": true. El bot PERMANECE ACTIVO (botDisabled = false).
 
 6. CANALIZACIÓN CON ASESOR COMERCIAL ESPECIALIZADO:
    - Si el usuario solicita hablar con una persona, requiere asesoría personalizada avanzada o pide la llamada de un especialista, establece "trigger_human_handoff": true, "propose_advisor_handoff": true y "handoff_reason": "Solicitud de atención humana".
@@ -144,6 +157,35 @@ REGLAS ESENCIALES DE INTERACCIÓN Y CERO ALUCINACIÓN:
      "media_to_send": "INSTALACION_PROFESIONAL"
      "next_step": 2
 
+9. COMPLETITUD TÉCNICA EN PASO 3 (TECHO Y SOMBRAS):
+   - En el Paso 3, se evalúan DOS aspectos técnicos indispensables: el tipo de techo (concreto, lámina, teja) y la presencia de sombras (árboles, tinacos, muros altos o edificios vecinos).
+   - Si el usuario responde sobre el tipo de techo pero omite indicar si tiene sombras (o si shadows_status es "unknown"):
+     ESTRICTAMENTE PROHIBIDO avanzar al Paso 4 de cotización.
+     Mantén obligatoriamente "next_step": 3.
+     Agradece el dato del tipo de techo y pregunta amablemente sobre las sombras:
+     "¡Excelente, techo de [tipo]! 🏢 Y respecto a posibles sombras de árboles, tinacos o construcciones vecinas, ¿hay alguna que le dé a tu techo durante el día?"
+   - Extrae obligatoriamente:
+     - "roof_type": tipo de techo indicado.
+     - "shadows_status": "none" (sin sombras / despejado), "present" (hay sombras), o "unknown" (no mencionado/pendiente).
+     - "has_shade": false si es "none", true si es "present", null si es "unknown".
+
+10. OFRECIMIENTO Y GATING DE CONSENTIMIENTO PARA FINANCIAMIENTO (PASO 5 - U-FIRST UX):
+   - Tras entregar la cotización preliminar (Paso 4):
+     ESTRICTAMENTE PROHIBIDO enviar el brochure de financiamiento de forma automática o prematura.
+     Sofía debe ofrecer primero las opciones de financiamiento y preguntar amablemente al cliente si desea conocerlas:
+     "Además de la inversión de contado, contamos con atractivos planes de financiamiento con los que tu sistema se paga prácticamente con el mismo ahorro que generas en tu recibo de CFE. 💳☀️ ¿Te gustaría que te comparta nuestras opciones y requisitos de financiamiento?"
+     Establece obligatoriamente en tu respuesta JSON:
+     "propose_financing": true,
+     "financing_consent_requested": true,
+     "financing_consent_given": false,
+     "media_to_send": null,
+     "next_step": 5
+   - Confirmación del Usuario (Paso 5):
+     - Si el usuario responde afirmativamente ("Sí", "Me interesa", "Por favor", "A ver", "Cuáles son"):
+       Establece "financing_consent_given": true, "media_to_send": "FINANCIAMIENTO", y envía un mensaje introductorio cálido.
+     - Si el usuario indica que prefiere pago de contado o no le interesa el financiamiento ("Prefiero de contado", "No gracias"):
+       Establece "financing_consent_given": false, "media_to_send": null, respeta su preferencia con elegancia y avanza hacia la Visita Técnica Gratuita (Paso 6).
+
 ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
 {
   "next_step": number, // Paso actual (1 a 6)
@@ -153,6 +195,8 @@ ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
     "bill_amount": number | null,
     "bill_frequency": "bimestral" | "mensual" | null,
     "roof_type": string | null,
+    "has_shade": boolean | null,
+    "shadows_status": "none" | "present" | "unknown",
     "meter_distance": string | null,
     "extra_loads": string | null,
     "location": string | null,
@@ -160,6 +204,9 @@ ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
   },
   "quote_consent_requested": boolean,
   "quote_consent_given": boolean,
+  "propose_financing": boolean,
+  "financing_consent_requested": boolean,
+  "financing_consent_given": boolean,
   "propose_technical_visit": boolean,
   "propose_advisor_handoff": boolean,
   "trigger_human_handoff": boolean,
@@ -183,6 +230,10 @@ ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
     <previous_session_summary>${ctx.previousSessionSummary ? this.sanitizeInput(ctx.previousSessionSummary) : 'Sin sesión previa'}</previous_session_summary>
     <quote_consent_requested>${Boolean(ctx.quoteConsentRequested)}</quote_consent_requested>
     <quote_consent_given>${Boolean(ctx.quoteConsentGiven)}</quote_consent_given>
+    <financing_consent_requested>${Boolean(ctx.financingConsentRequested)}</financing_consent_requested>
+    <financing_consent_given>${Boolean(ctx.financingConsentGiven)}</financing_consent_given>
+    <shadows_assessed>${Boolean(ctx.extractedData?.shadowsAssessed)}</shadows_assessed>
+    <has_shade>${ctx.extractedData?.hasShade !== undefined ? ctx.extractedData.hasShade : 'desconocido'}</has_shade>
     <bot_disabled>${ctx.botDisabled}</bot_disabled>
     <data_collected>${JSON.stringify(ctx.extractedData)}</data_collected>
   </current_state>
@@ -210,9 +261,16 @@ ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
       return {
         next_step: typeof parsed.next_step === 'number' ? parsed.next_step : 1,
         message_to_user: parsed.message_to_user || 'Hola, ¿en qué puedo ayudarte hoy?',
-        extracted_data: parsed.extracted_data || {},
+        extracted_data: {
+          ...parsed.extracted_data,
+          shadows_status: parsed.extracted_data?.shadows_status || (parsed.extracted_data?.has_shade === false ? 'none' : parsed.extracted_data?.has_shade === true ? 'present' : undefined),
+          has_shade: parsed.extracted_data?.has_shade !== undefined ? parsed.extracted_data.has_shade : (parsed.extracted_data?.shadows_status === 'none' ? false : parsed.extracted_data?.shadows_status === 'present' ? true : null),
+        },
         quote_consent_requested: Boolean(parsed.quote_consent_requested),
         quote_consent_given: Boolean(parsed.quote_consent_given),
+        propose_financing: Boolean(parsed.propose_financing),
+        financing_consent_requested: Boolean(parsed.financing_consent_requested),
+        financing_consent_given: Boolean(parsed.financing_consent_given),
         propose_technical_visit: Boolean(parsed.propose_technical_visit),
         propose_advisor_handoff: Boolean(parsed.propose_advisor_handoff),
         trigger_human_handoff: Boolean(parsed.trigger_human_handoff),

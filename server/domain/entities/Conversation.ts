@@ -27,10 +27,15 @@ export interface ConversationState {
   isOwner?: boolean;
   roofType?: string;
   hasShade?: boolean;
+  shadows_assessed?: boolean;
+  shadowsAssessed?: boolean;
   voltage?: string;
   floors?: number;
   quoteConsentRequested?: boolean;
   quoteConsentGiven?: boolean;
+  financingConsentRequested?: boolean;
+  financingConsentGiven?: boolean;
+  whatsappProfileName?: string;
   mediaSentFlags?: {
     instalacionProfessional?: boolean;
     financiamiento?: boolean;
