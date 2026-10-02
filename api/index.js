@@ -1208,7 +1208,7 @@ var AgentRepository = class {
   }
   col(tenantId) {
     if (this.db) {
-      return this.db.collection(`tenants/${tenantId}/config/agents`);
+      return this.db.collection(`tenants/${tenantId}/agents`);
     }
     return null;
   }

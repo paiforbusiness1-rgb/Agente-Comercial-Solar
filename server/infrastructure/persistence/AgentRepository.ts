@@ -1,7 +1,7 @@
 /**
  * AgentRepository.ts
  * Firestore persistence for Agent entities with In-Memory fallback.
- * Collection: tenants/{tenantId}/config/agents
+ * Collection: tenants/{tenantId}/agents (3 components - Odd number required by Firestore)
  * Implements round-robin assignment by assignedLeadsCount (Anti-God-Object Rule 3).
  */
 
@@ -16,7 +16,7 @@ export class AgentRepository {
 
   private col(tenantId: string) {
     if (this.db) {
-      return this.db.collection(`tenants/${tenantId}/config/agents`);
+      return this.db.collection(`tenants/${tenantId}/agents`);
     }
     return null;
   }
@@ -76,7 +76,16 @@ export class AgentRepository {
       .sort((a, b) => a.assignedLeadsCount - b.assignedLeadsCount);
   }
 
-  async save(agent: Omit<Agent, 'id' | 'createdAt' | 'updatedAt'> & { id?: string; createdAt?: string; updatedAt?: string }, tenantId: string): Promise<Agent> {
+  async save(
+    agent: Omit<Agent, 'id' | 'createdAt' | 'updatedAt' | 'isActive' | 'assignedLeadsCount'> & {
+      id?: string;
+      createdAt?: string;
+      updatedAt?: string;
+      isActive?: boolean;
+      assignedLeadsCount?: number;
+    },
+    tenantId: string
+  ): Promise<Agent> {
     const now = new Date().toISOString();
     const store = this.getTenantStore(tenantId);
 
