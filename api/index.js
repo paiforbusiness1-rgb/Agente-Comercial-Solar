@@ -591,8 +591,12 @@ var ReceiveMessageUseCase = class {
       await this.sendWhatsApp(phone, result.replyText);
     }
     if (result.mediaSent && result.mediaSent.length > 0) {
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+      } catch {
+      }
       for (const mediaUrl of result.mediaSent) {
-        await this.sendWhatsAppMedia(phone, mediaUrl);
+        await this.sendWhatsAppMedia(phone, mediaUrl, "Informaci\xF3n de Servicios e Instalaci\xF3n Profesional O3 Energy");
       }
     }
     logger.info("[ReceiveMessageUseCase] Execution finished", {
@@ -672,9 +676,13 @@ REGLAS ESENCIALES DE INTERACCI\xD3N Y CERO ALUCINACI\xD3N:
 7. RESPUESTAS LIMPIAS Y NO REPETITIVAS:
    - Responde de forma directa a las preguntas espec\xEDficas del usuario sin volver a repetir la tarjeta larga de cotizaci\xF3n en cada turno.
 
-8. ANUNCIO C\xC1LIDO DEL BROCHURE / INFOGRAF\xCDA (U-FIRST UX):
-   - Cuando vayas a solicitar el env\xEDo del brochure o infograf\xEDa ("media_to_send": "INSTALACION_PROFESIONAL"), incluye SIEMPRE al final de tu mensaje de texto una frase amable anunci\xE1ndolo:
-     "\xA1Mientras tanto, te comparto un brochure para que conozcas nuestros servicios e instalaci\xF3n profesional! \u{1F4C4}\u2600\uFE0F"
+8. SOLICITUD DE RECIBO Y ANUNCIO C\xC1LIDO DEL BROCHURE (PASO 2 - U-FIRST UX):
+   - Al solicitar el monto de recibo de luz (ej. "\xBFpodr\xEDas indicarme el monto de tu recibo de luz y si es bimestral o mensual?"):
+     Agrega OBLIGATORIAMENTE al final de tu mensaje la frase amable de cortes\xEDa:
+     "Mientras me pasas el dato, te comparto informaci\xF3n detallada de nuestro servicio. \u{1F4C4}\u2600\uFE0F"
+   - Establece obligatoriamente en tu respuesta JSON:
+     "media_to_send": "INSTALACION_PROFESIONAL"
+     "next_step": 2
 
 ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
 {
@@ -1540,6 +1548,12 @@ ${parsed.message_to_user}`;
       const imgUrl = `${AppConfig.mediaBaseUrl}/INSTALACION_PROFESIONAL.jpeg`;
       mediaSent.push(imgUrl);
       conv.state.mediaSentFlags.instalacionProfessional = true;
+      const hasBridgePhrase = /(?:mientras|te comparto|informaci[oó]n detallada|nuestro servicio)/i.test(finalReply);
+      if (!hasBridgePhrase) {
+        finalReply = `${finalReply.trim()}
+
+Mientras me pasas el dato, te comparto informaci\xF3n detallada de nuestro servicio. \u{1F4C4}\u2600\uFE0F`;
+      }
     }
     const shouldSendFinanciamiento = (parsed.media_to_send === "FINANCIAMIENTO" || conv.state.quoteConsentGiven && parsed.next_step >= 4) && !conv.state.mediaSentFlags.financiamiento;
     if (shouldSendFinanciamiento) {
@@ -1564,6 +1578,13 @@ ${parsed.message_to_user}`;
     }
     conv.messages.push({ sender: "user", text: messageText, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
     conv.messages.push({ sender: "bot", text: finalReply, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
+    if (mediaSent.length > 0) {
+      conv.messages.push({
+        sender: "bot",
+        text: "\u{1F4C4} [Brochure Enviado]: Informaci\xF3n detallada de servicios e instalaci\xF3n profesional",
+        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+      });
+    }
     conv.lastMessageAt = (/* @__PURE__ */ new Date()).toISOString();
     await this.conversationRepo.save(conv);
     return {

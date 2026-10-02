@@ -262,6 +262,12 @@ export class SofiaFlowOrchestrator {
       const imgUrl = `${AppConfig.mediaBaseUrl}/INSTALACION_PROFESIONAL.jpeg`;
       mediaSent.push(imgUrl);
       conv.state.mediaSentFlags.instalacionProfessional = true;
+
+      // Refinamiento 1: Guardrail quirúrgico de frase puente en Paso 2
+      const hasBridgePhrase = /(?:mientras|te comparto|informaci[oó]n detallada|nuestro servicio)/i.test(finalReply);
+      if (!hasBridgePhrase) {
+        finalReply = `${finalReply.trim()}\n\nMientras me pasas el dato, te comparto información detallada de nuestro servicio. 📄☀️`;
+      }
     }
 
     // Financiamiento (Step 4/5)
@@ -294,9 +300,16 @@ export class SofiaFlowOrchestrator {
     // Append messages to conversation history
     conv.messages.push({ sender: 'user', text: messageText, timestamp: new Date().toISOString() });
     conv.messages.push({ sender: 'bot', text: finalReply, timestamp: new Date().toISOString() });
+    if (mediaSent.length > 0) {
+      conv.messages.push({
+        sender: 'bot',
+        text: '📄 [Brochure Enviado]: Información detallada de servicios e instalación profesional',
+        timestamp: new Date().toISOString(),
+      });
+    }
     conv.lastMessageAt = new Date().toISOString();
 
-    // 8. Save state to repository (Persistent Database)
+    // 8. Save state to repository (Persistent Database - Refinamiento 3)
     await this.conversationRepo.save(conv);
 
     return {

@@ -42,10 +42,15 @@ export class ReceiveMessageUseCase {
       await this.sendWhatsApp(phone, result.replyText);
     }
 
-    // 3. Send media attachments if specified by step
+    // 3. Send media attachments with humanized pacing delay (Refinamiento 2: at least 1.2s before media dispatch)
     if (result.mediaSent && result.mediaSent.length > 0) {
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+      } catch {
+        // Safe timeout fallback
+      }
       for (const mediaUrl of result.mediaSent) {
-        await this.sendWhatsAppMedia(phone, mediaUrl);
+        await this.sendWhatsAppMedia(phone, mediaUrl, 'Información de Servicios e Instalación Profesional O3 Energy');
       }
     }
 
