@@ -330,20 +330,30 @@ export class SofiaFlowOrchestrator {
       }
     }
 
-    // Consent Gating Logic for Financing (Step 5) - Refinamiento 3
+    // Consent Gating Logic for Financing (Step 5) — Refinamiento 1 (APO-009)
     const wasFinancingRequested = conv.state.financingConsentRequested;
     if (parsed.financing_consent_requested || parsed.propose_financing) {
       conv.state.financingConsentRequested = true;
     }
 
-    if (parsed.financing_consent_given || (wasFinancingRequested && explicitAffirmative)) {
+    if (wasFinancingRequested && (explicitAffirmative || parsed.financing_consent_given)) {
       conv.state.financingConsentGiven = true;
     }
 
-    // Financiamiento (Step 5) — Gating Estricto con Consentimiento (Cero Spam)
-    const shouldSendFinanciamiento = (parsed.media_to_send === 'FINANCIAMIENTO' || parsed.propose_financing) &&
-                                    conv.state.financingConsentGiven === true &&
-                                    !conv.state.mediaSentFlags.financiamiento;
+    // Guardrail de Defensa en Profundidad:
+    // Si el mensaje saliente pregunta al usuario si desea el brochure/planes/requisitos,
+    // significa que el bot está pidiendo permiso AHORA MISMO. El consentimiento NO puede estar dado.
+    if (/(?:te gustar[ií]a|deseas|quieres|te env[ií]e|te comparto|gustas).*(?:brochure|requisitos|pasos|planes).*\??/i.test(finalReply)) {
+      conv.state.financingConsentRequested = true;
+      conv.state.financingConsentGiven = false; // Bloqueo determinista
+    }
+
+    // Financiamiento (Step 5) — Gating Estricto con Consentimiento (Primacía del Estado, Cero Spam)
+    const shouldSendFinanciamiento =
+      parsed.media_to_send === 'FINANCIAMIENTO' &&
+      conv.state.financingConsentGiven === true &&
+      !conv.state.mediaSentFlags.financiamiento;
+
     if (shouldSendFinanciamiento) {
       const imgUrl = `${AppConfig.mediaBaseUrl}/FINANCIAMIENTO.jpeg`;
       mediaSent.push(imgUrl);

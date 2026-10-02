@@ -65,7 +65,8 @@ export class ReceiveMessageUseCase {
         // Safe timeout fallback
       }
       for (const mediaUrl of result.mediaSent) {
-        await this.sendWhatsAppMedia(phone, mediaUrl, 'Información de Servicios e Instalación Profesional O3 Energy');
+        const caption = this.getMediaCaption(mediaUrl);
+        await this.sendWhatsAppMedia(phone, mediaUrl, caption);
       }
     }
 
@@ -76,5 +77,14 @@ export class ReceiveMessageUseCase {
     });
 
     return { reply: result.replyText, leadGenerated: result.botDisabled };
+  }
+
+  /**
+   * Refinamiento 2 (APO-009): Resolución de Captions basada en diccionario centralizado (HRU)
+   */
+  public getMediaCaption(url: string): string {
+    if (url.includes('FINANCIAMIENTO')) return 'Requisitos y Planes de Financiamiento Solar O3 Energy';
+    if (url.includes('INSTALACION_PROFESIONAL')) return 'Información de Servicios e Instalación Profesional O3 Energy';
+    return 'Información de O3 Energy'; // Fallback seguro
   }
 }

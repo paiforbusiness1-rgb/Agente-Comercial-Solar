@@ -608,7 +608,8 @@ var ReceiveMessageUseCase = class {
       } catch {
       }
       for (const mediaUrl of result.mediaSent) {
-        await this.sendWhatsAppMedia(phone, mediaUrl, "Informaci\xF3n de Servicios e Instalaci\xF3n Profesional O3 Energy");
+        const caption = this.getMediaCaption(mediaUrl);
+        await this.sendWhatsAppMedia(phone, mediaUrl, caption);
       }
     }
     logger.info("[ReceiveMessageUseCase] Execution finished", {
@@ -617,6 +618,14 @@ var ReceiveMessageUseCase = class {
       botDisabled: result.botDisabled
     });
     return { reply: result.replyText, leadGenerated: result.botDisabled };
+  }
+  /**
+   * Refinamiento 2 (APO-009): Resolución de Captions basada en diccionario centralizado (HRU)
+   */
+  getMediaCaption(url) {
+    if (url.includes("FINANCIAMIENTO")) return "Requisitos y Planes de Financiamiento Solar O3 Energy";
+    if (url.includes("INSTALACION_PROFESIONAL")) return "Informaci\xF3n de Servicios e Instalaci\xF3n Profesional O3 Energy";
+    return "Informaci\xF3n de O3 Energy";
   }
 };
 
@@ -718,21 +727,29 @@ REGLAS ESENCIALES DE INTERACCI\xD3N Y CERO ALUCINACI\xD3N:
      - "has_shade": false si es "none", true si es "present", null si es "unknown".
 
 10. OFRECIMIENTO Y GATING DE CONSENTIMIENTO PARA FINANCIAMIENTO (PASO 5 - U-FIRST UX):
-   - Tras entregar la cotizaci\xF3n preliminar (Paso 4):
-     ESTRICTAMENTE PROHIBIDO enviar el brochure de financiamiento de forma autom\xE1tica o prematura.
-     Sof\xEDa debe ofrecer primero las opciones de financiamiento y preguntar amablemente al cliente si desea conocerlas:
-     "Adem\xE1s de la inversi\xF3n de contado, contamos con atractivos planes de financiamiento con los que tu sistema se paga pr\xE1cticamente con el mismo ahorro que generas en tu recibo de CFE. \u{1F4B3}\u2600\uFE0F \xBFTe gustar\xEDa que te comparta nuestras opciones y requisitos de financiamiento?"
-     Establece obligatoriamente en tu respuesta JSON:
-     "propose_financing": true,
-     "financing_consent_requested": true,
-     "financing_consent_given": false,
-     "media_to_send": null,
-     "next_step": 5
-   - Confirmaci\xF3n del Usuario (Paso 5):
-     - Si el usuario responde afirmativamente ("S\xED", "Me interesa", "Por favor", "A ver", "Cu\xE1les son"):
-       Establece "financing_consent_given": true, "media_to_send": "FINANCIAMIENTO", y env\xEDa un mensaje introductorio c\xE1lido.
-     - Si el usuario indica que prefiere pago de contado o no le interesa el financiamiento ("Prefiero de contado", "No gracias"):
-       Establece "financing_consent_given": false, "media_to_send": null, respeta su preferencia con elegancia y avanza hacia la Visita T\xE9cnica Gratuita (Paso 6).
+   - Flujo Estricto de 2 Fases (Cero Env\xEDos Prematuros):
+     FASE 1 \u2014 OFRECIMIENTO EN TEXTO Y PREGUNTA (Sin env\xEDo de brochure):
+       Tras entregar la cotizaci\xF3n preliminar (Paso 4) o al abrir el tema de financiamiento:
+       Sof\xEDa presenta primero las opciones de financiamiento en texto (ej. planes a 12, 24 y 36 meses con pagos estimados) y pregunta amablemente al cliente si desea que le comparta el brochure con los requisitos oficiales:
+       "\xBFTe gustar\xEDa que te env\xEDe el brochure oficial con los requisitos y pasos para tramitar tu financiamiento? \u{1F4C4}"
+       ESTRICTAMENTE PROHIBIDO enviar el brochure en esta fase.
+       Establece obligatoriamente en tu respuesta JSON:
+       "propose_financing": true,
+       "financing_consent_requested": true,
+       "financing_consent_given": false,
+       "media_to_send": null,
+       "next_step": 5
+
+     FASE 2 \u2014 ENTREGA TRAS CONFIRMACI\xD3N EXPRESA DEL USUARIO:
+       Cuando el usuario responda expresamente a la pregunta anterior confirmando que desea el brochure ("S\xED", "Por favor", "M\xE1ndamelo", "Claro", "P\xE1samelo"):
+       Establece obligatoriamente:
+       "financing_consent_given": true,
+       "media_to_send": "FINANCIAMIENTO",
+       "next_step": 5
+       Acompa\xF1a con un mensaje c\xE1lido presentando el brochure y avanza hacia la propuesta de Visita T\xE9cnica Gratuita (Paso 6).
+
+       Si el usuario indica que no le interesa el financiamiento o prefiere de contado ("Prefiero de contado", "No gracias"):
+       Establece "financing_consent_given": false, "media_to_send": null, respeta su decisi\xF3n con elegancia y avanza hacia la Visita T\xE9cnica Gratuita (Paso 6).
 
 ESTRUCTURA JSON OBLIGATORIA DE RESPUESTA:
 {
@@ -1671,10 +1688,14 @@ Mientras me pasas el dato, te comparto informaci\xF3n detallada de nuestro servi
     if (parsed.financing_consent_requested || parsed.propose_financing) {
       conv.state.financingConsentRequested = true;
     }
-    if (parsed.financing_consent_given || wasFinancingRequested && explicitAffirmative) {
+    if (wasFinancingRequested && (explicitAffirmative || parsed.financing_consent_given)) {
       conv.state.financingConsentGiven = true;
     }
-    const shouldSendFinanciamiento = (parsed.media_to_send === "FINANCIAMIENTO" || parsed.propose_financing) && conv.state.financingConsentGiven === true && !conv.state.mediaSentFlags.financiamiento;
+    if (/(?:te gustar[ií]a|deseas|quieres|te env[ií]e|te comparto|gustas).*(?:brochure|requisitos|pasos|planes).*\??/i.test(finalReply)) {
+      conv.state.financingConsentRequested = true;
+      conv.state.financingConsentGiven = false;
+    }
+    const shouldSendFinanciamiento = parsed.media_to_send === "FINANCIAMIENTO" && conv.state.financingConsentGiven === true && !conv.state.mediaSentFlags.financiamiento;
     if (shouldSendFinanciamiento) {
       const imgUrl = `${AppConfig.mediaBaseUrl}/FINANCIAMIENTO.jpeg`;
       mediaSent.push(imgUrl);
