@@ -52,7 +52,10 @@ export default function App() {
     });
   }, [triggerBrowserNotification]);
 
-  const { chats, setChats, leads, setLeads, isLoading, isFirebaseConnected, lastRefreshed, refreshChats } = useFirebase({
+  const { 
+    chats, setChats, leads, setLeads, isLoading, isFirebaseConnected, 
+    lastRefreshed, refreshChats, syncStatus, isManualRefreshing, triggerManualRefresh 
+  } = useFirebase({
     onNewLeadNotification: handleNewLeadNotification
   });
 
@@ -121,6 +124,9 @@ export default function App() {
         setIsMobileMenuOpen={setIsMobileMenuOpen}
         user={user}
         handleLogout={logout}
+        syncStatus={syncStatus}
+        isManualRefreshing={isManualRefreshing}
+        onManualRefresh={triggerManualRefresh}
       />
 
       <main className="flex-1 flex flex-col overflow-hidden relative transition-colors duration-200 bg-transparent z-10">

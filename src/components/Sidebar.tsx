@@ -1,5 +1,5 @@
 import React from 'react';
-import { MessageSquare, Users, Database, Sparkles, Server, Trash2, X, LogOut, ShieldCheck, UserCog } from 'lucide-react';
+import { MessageSquare, Users, Database, Sparkles, Server, Trash2, X, LogOut, ShieldCheck, UserCog, RefreshCw } from 'lucide-react';
 import { Chat, QualifiedLead } from '../types';
 
 interface SidebarProps {
@@ -15,6 +15,9 @@ interface SidebarProps {
   setIsMobileMenuOpen: (val: boolean) => void;
   user?: { email: string; role: string } | null;
   handleLogout?: () => Promise<void>;
+  syncStatus?: 'connected' | 'polling_active' | 'sleeping' | 'background';
+  isManualRefreshing?: boolean;
+  onManualRefresh?: () => void;
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
@@ -29,7 +32,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
   isMobileMenuOpen,
   setIsMobileMenuOpen,
   user,
-  handleLogout
+  handleLogout,
+  syncStatus = 'connected',
+  isManualRefreshing = false,
+  onManualRefresh,
 }) => {
   return (
     <>
@@ -243,9 +249,31 @@ export const Sidebar: React.FC<SidebarProps> = ({
 
           <div className="flex items-center justify-between text-xs">
             <span className="text-slate-550">Firestore DB:</span>
-            <span className={`flex items-center font-medium ${isFirebaseConnected ? 'text-emerald-500' : 'text-amber-500'}`}>
-              <span className={`h-2 w-2 rounded-full mr-1.5 ${isFirebaseConnected ? 'bg-emerald-500 shadow-sm shadow-emerald-400' : 'bg-amber-400 animate-pulse'}`} />
-              {isFirebaseConnected ? 'Conectado Real-time' : 'REST Polling Activo'}
+            <span className={`flex items-center font-medium ${
+              isFirebaseConnected 
+                ? 'text-emerald-500' 
+                : syncStatus === 'sleeping'
+                ? 'text-blue-400'
+                : syncStatus === 'background'
+                ? 'text-slate-400'
+                : 'text-amber-500'
+            }`}>
+              <span className={`h-2 w-2 rounded-full mr-1.5 ${
+                isFirebaseConnected 
+                  ? 'bg-emerald-500 shadow-sm shadow-emerald-400' 
+                  : syncStatus === 'sleeping'
+                  ? 'bg-blue-400'
+                  : syncStatus === 'background'
+                  ? 'bg-slate-400'
+                  : 'bg-amber-400 animate-pulse'
+              }`} />
+              {isFirebaseConnected 
+                ? 'Conectado Real-time' 
+                : syncStatus === 'sleeping' 
+                ? 'En Reposo (Ahorro)' 
+                : syncStatus === 'background'
+                ? 'Segundo Plano (0%)'
+                : 'REST Adaptativo (60s)'}
             </span>
           </div>
           <div className="flex items-center justify-between text-xs">
@@ -255,11 +283,26 @@ export const Sidebar: React.FC<SidebarProps> = ({
               gemini-2.0-flash
             </span>
           </div>
-          {lastRefreshed && (
-            <div className={`text-[10px] text-right font-mono ${isDarkMode ? 'text-slate-600' : 'text-slate-500'}`}>
-              Refrescado: {lastRefreshed}
-            </div>
-          )}
+          <div className="flex items-center justify-between text-[10px] font-mono">
+            <span className={isDarkMode ? 'text-slate-600' : 'text-slate-500'}>
+              {lastRefreshed ? `Refrescado: ${lastRefreshed}` : ''}
+            </span>
+            {onManualRefresh && (
+              <button 
+                onClick={onManualRefresh}
+                disabled={isManualRefreshing}
+                title="Sincronizar ahora con el servidor"
+                className={`flex items-center space-x-1 px-1.5 py-0.5 rounded text-[10px] transition-colors cursor-pointer ${
+                  isDarkMode 
+                    ? 'hover:bg-slate-800 text-slate-400 hover:text-amber-400' 
+                    : 'hover:bg-slate-100 text-slate-500 hover:text-amber-600'
+                }`}
+              >
+                <RefreshCw className={`h-2.5 w-2.5 ${isManualRefreshing ? 'animate-spin text-amber-500' : ''}`} />
+                <span>Sync</span>
+              </button>
+            )}
+          </div>
           <button 
             onClick={handleResetDemo}
             className={`w-full flex items-center justify-center space-x-2 py-2 px-3 border rounded-xl transition-all duration-200 font-medium cursor-pointer text-xs ${
