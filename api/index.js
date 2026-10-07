@@ -63,6 +63,18 @@ var AppConfig = {
       fallbackEmail: process.env.FALLBACK_AGENT_EMAIL || "ventas@o3energy.mx",
       fallbackWhatsapp: process.env.FALLBACK_AGENT_WA || ""
     };
+  },
+  get gemini() {
+    return {
+      apiKey: process.env.GEMINI_API_KEY || "",
+      model: process.env.GEMINI_MODEL || "gemini-2.0-flash"
+    };
+  },
+  get media() {
+    return {
+      maxSizeBytes: parseInt(process.env.MAX_MEDIA_SIZE_BYTES || "5242880", 10)
+      // 5 MB Size Guard (Refinamiento 1: SSD)
+    };
   }
 };
 
@@ -565,25 +577,424 @@ var FirestoreLeadRepository = class {
   }
 };
 
+// server/infrastructure/media/WhatsAppMediaService.ts
+var WhatsAppMediaService = class {
+  constructor(customFetch, token) {
+    this.fetchFn = customFetch || fetch;
+    this.token = token;
+  }
+  /**
+   * Descarga un archivo multimedia de Meta Graph API con validación previa de tamaño
+   * @param mediaId ID del objeto multimedia entregado por el webhook de WhatsApp
+   * @param suggestedFilename Nombre sugerido por el webhook (opcional)
+   */
+  async downloadMedia(mediaId, suggestedFilename) {
+    const token = this.token || AppConfig.meta.accessToken || (AppConfig.env === "test" ? "test-mock-meta-token" : "");
+    if (!token) {
+      logger.warn("[WhatsAppMediaService] WhatsApp Access Token no configurado");
+      return {
+        success: false,
+        error: "not_configured",
+        message: "Token de WhatsApp no disponible para descargar medios"
+      };
+    }
+    try {
+      const metadataRes = await this.fetchFn(`https://graph.facebook.com/v20.0/${mediaId}`, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+      if (!metadataRes.ok) {
+        logger.error("[WhatsAppMediaService] Error al obtener metadatos de medio", {
+          mediaId,
+          status: metadataRes.status
+        });
+        return {
+          success: false,
+          error: "fetch_failed",
+          message: `Error Meta API: ${metadataRes.statusText}`
+        };
+      }
+      const metadata = await metadataRes.json();
+      if (!metadata.url) {
+        logger.error("[WhatsAppMediaService] Metadatos de medio no contienen URL", { mediaId });
+        return {
+          success: false,
+          error: "fetch_failed",
+          message: "URL de descarga de medio ausente en respuesta de Meta"
+        };
+      }
+      const fileSize = metadata.file_size || 0;
+      const maxSize = AppConfig.media.maxSizeBytes;
+      if (fileSize > maxSize) {
+        logger.warn("[WhatsAppMediaService] Archivo excede l\xEDmite de tama\xF1o permitido", {
+          mediaId,
+          fileSize,
+          maxSize
+        });
+        return {
+          success: false,
+          error: "size_exceeded",
+          fileSize,
+          message: "El archivo es demasiado pesado para procesarlo directamente (m\xE1ximo 5 MB)"
+        };
+      }
+      const binaryRes = await this.fetchFn(metadata.url, {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+      if (!binaryRes.ok) {
+        logger.error("[WhatsAppMediaService] Error al descargar binario", {
+          mediaId,
+          status: binaryRes.status
+        });
+        return {
+          success: false,
+          error: "fetch_failed",
+          message: `Error al transferir archivo binario: ${binaryRes.statusText}`
+        };
+      }
+      const arrayBuffer = await binaryRes.arrayBuffer();
+      const buffer = Buffer.from(arrayBuffer);
+      if (buffer.length > maxSize) {
+        logger.warn("[WhatsAppMediaService] Buffer descargado excede l\xEDmite de seguridad", {
+          length: buffer.length,
+          maxSize
+        });
+        return {
+          success: false,
+          error: "size_exceeded",
+          fileSize: buffer.length,
+          message: "El archivo es demasiado pesado para procesarlo directamente (m\xE1ximo 5 MB)"
+        };
+      }
+      logger.info("[WhatsAppMediaService] Medio descargado exitosamente", {
+        mediaId,
+        sizeBytes: buffer.length,
+        mimeType: metadata.mime_type
+      });
+      return {
+        success: true,
+        buffer,
+        mimeType: metadata.mime_type || "application/octet-stream",
+        filename: suggestedFilename,
+        fileSize: buffer.length
+      };
+    } catch (err) {
+      logger.error("[WhatsAppMediaService] Excepci\xF3n durante descarga de medio", {
+        mediaId,
+        error: err.message
+      });
+      return {
+        success: false,
+        error: "fetch_failed",
+        message: err.message || "Excepci\xF3n desconocida al descargar medio"
+      };
+    }
+  }
+};
+
+// server/domain/services/CfeReceiptExtractorService.ts
+import { z } from "zod";
+var CfeReceiptSchema = z.object({
+  montoTotal: z.number().min(50).max(2e6),
+  // Rango realista CFE en MXN ($50 a $2,000,000)
+  periodo: z.enum(["mensual", "bimestral"]),
+  tarifa: z.string().optional(),
+  numeroServicio: z.string().optional(),
+  nombreCliente: z.string().optional(),
+  confianza: z.enum(["alta", "baja"])
+});
+var CfeReceiptExtractorService = class {
+  constructor(deps) {
+    this.pdfParserFn = deps?.pdfParserFn || (async (buffer) => {
+      try {
+        const pdfModule = await import("pdf-parse");
+        const PDFParse = pdfModule.PDFParse || pdfModule.default?.PDFParse;
+        if (PDFParse) {
+          const parser = new PDFParse({ data: buffer });
+          const text = await parser.getText();
+          return text || "";
+        }
+        return "";
+      } catch (err) {
+        logger.warn("[CfeReceiptExtractorService] Error en parser nativo PDF", { error: err.message });
+        return "";
+      }
+    });
+    this.geminiVisionFn = deps?.geminiVisionFn;
+  }
+  /**
+   * Extrae deterministamente los datos de un recibo CFE desde un Buffer
+   * Retorna CfeReceiptData si la extracción es confiable, o null si es ilegible/invalida.
+   */
+  async extractFromReceipt(buffer, mimeType, filename) {
+    logger.info("[CfeReceiptExtractorService] Iniciando an\xE1lisis de recibo", {
+      mimeType,
+      filename,
+      sizeBytes: buffer.length
+    });
+    const isPdf = mimeType === "application/pdf" || filename && filename.toLowerCase().endsWith(".pdf");
+    if (isPdf) {
+      try {
+        const text = await this.pdfParserFn(buffer);
+        if (text && text.trim().length > 0) {
+          const parsed = this.parseCfeText(text);
+          if (parsed && parsed.confianza === "alta") {
+            const validation = CfeReceiptSchema.safeParse(parsed);
+            if (validation.success) {
+              logger.info("[CfeReceiptExtractorService] Recibo PDF parseado exitosamente", {
+                monto: validation.data.montoTotal,
+                tarifa: validation.data.tarifa,
+                periodo: validation.data.periodo
+              });
+              return validation.data;
+            }
+          }
+        }
+      } catch (pdfErr) {
+        logger.warn("[CfeReceiptExtractorService] Extracci\xF3n de texto PDF fall\xF3, intentando visi\xF3n...", {
+          error: pdfErr.message
+        });
+      }
+    }
+    try {
+      const visionResult = await this.callVisionModel(buffer, mimeType);
+      if (!visionResult) {
+        return null;
+      }
+      const validation = CfeReceiptSchema.safeParse(visionResult);
+      if (!validation.success) {
+        logger.warn("[CfeReceiptExtractorService] Resultado de visi\xF3n rechazado por esquema Zod", {
+          errors: validation.error.format()
+        });
+        return null;
+      }
+      if (validation.data.confianza === "baja") {
+        logger.warn("[CfeReceiptExtractorService] Visi\xF3n report\xF3 baja confianza (posible alucinaci\xF3n/foto borrosa)", {
+          resultado: validation.data
+        });
+        return null;
+      }
+      logger.info("[CfeReceiptExtractorService] Visi\xF3n extrajo datos con alta confianza", {
+        monto: validation.data.montoTotal,
+        periodo: validation.data.periodo,
+        tarifa: validation.data.tarifa
+      });
+      return validation.data;
+    } catch (visionErr) {
+      logger.error("[CfeReceiptExtractorService] Error durante visi\xF3n multimodal", {
+        error: visionErr.message
+      });
+      return null;
+    }
+  }
+  /**
+   * Parser heurístico determinista para texto de recibos CFE (PDF digital)
+   */
+  parseCfeText(rawText) {
+    const text = rawText.replace(/\r\n/g, "\n");
+    let montoTotal = null;
+    const totalRegexes = [
+      /TOTAL\s*A\s*PAGAR(?:\s*\(MXN\))?[\s:]*\$?[\s]*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?)/i,
+      /IMPORTE\s*A\s*PAGAR[\s:]*\$?[\s]*([0-9]{1,3}(?:,[0-9]{3})*(?:\.[0-9]{2})?)/i,
+      /\$\s*([0-9]{1,3}(?:,[0-9]{3})+(?:\.[0-9]{2})?)/
+    ];
+    for (const rx of totalRegexes) {
+      const match = text.match(rx);
+      if (match && match[1]) {
+        const cleanNum = parseFloat(match[1].replace(/,/g, ""));
+        if (!isNaN(cleanNum) && cleanNum >= 50 && cleanNum <= 2e6) {
+          montoTotal = Math.round(cleanNum);
+          break;
+        }
+      }
+    }
+    if (!montoTotal) {
+      return null;
+    }
+    let tarifa;
+    const tarifaMatch = text.match(/TARIFA[\s:]*([0-9A-Za-z]+)/i);
+    if (tarifaMatch && tarifaMatch[1]) {
+      tarifa = tarifaMatch[1].toUpperCase().trim();
+    }
+    let numeroServicio;
+    const serviceMatch = text.match(/NO\.?\s*DE\s*SERVICIO[\s:]*([0-9\s]{12,18})/i);
+    if (serviceMatch && serviceMatch[1]) {
+      numeroServicio = serviceMatch[1].replace(/\s/g, "").trim();
+    }
+    let periodo = "bimestral";
+    if (tarifa === "GDMTO" || tarifa === "GDMTH" || tarifa === "PDBT" || /PERIODO\s*MENSUAL/i.test(text) || /CADA\s*MES/i.test(text)) {
+      periodo = "mensual";
+    } else if (/BIMESTRE|BIMESTRAL/i.test(text)) {
+      periodo = "bimestral";
+    }
+    return {
+      montoTotal,
+      periodo,
+      tarifa,
+      numeroServicio,
+      confianza: "alta"
+    };
+  }
+  /**
+   * Invoca a Gemini 2.0 Flash Multimodal para procesar fotos de recibo
+   */
+  async callVisionModel(buffer, mimeType) {
+    if (this.geminiVisionFn) {
+      return this.geminiVisionFn(buffer, mimeType);
+    }
+    const apiKey = AppConfig.gemini.apiKey;
+    if (!apiKey) {
+      logger.warn("[CfeReceiptExtractorService] GEMINI_API_KEY no configurada para visi\xF3n");
+      return null;
+    }
+    const model = AppConfig.gemini.model || "gemini-2.0-flash";
+    const systemPrompt = `Eres un perito experto en an\xE1lisis forense de facturas de energ\xEDa el\xE9ctrica de la Comisi\xF3n Federal de Electricidad (CFE) en M\xE9xico.
+Analiza la imagen o documento adjunto y extrae los datos de facturaci\xF3n estrictamente en formato JSON v\xE1lido con este esquema:
+{
+  "montoTotal": number (Total a pagar en pesos mexicanos, ej: 30971),
+  "periodo": "mensual" | "bimestral",
+  "tarifa": string (ej: "GDMTO", "DAC", "PDBT", "1F"),
+  "numeroServicio": string,
+  "nombreCliente": string,
+  "confianza": "alta" | "baja" (Indica "baja" si la imagen es borrosa, no corresponde a un recibo de CFE, o el monto no es legible)
+}`;
+    const base64Data = buffer.toString("base64");
+    const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        systemInstruction: { parts: [{ text: systemPrompt }] },
+        contents: [
+          {
+            role: "user",
+            parts: [
+              {
+                inlineData: {
+                  mimeType: mimeType || "image/jpeg",
+                  data: base64Data
+                }
+              },
+              {
+                text: "Extrae el monto total y datos de este recibo de CFE en formato JSON estricto."
+              }
+            ]
+          }
+        ],
+        generationConfig: {
+          temperature: 0.1,
+          responseMimeType: "application/json"
+        }
+      })
+    });
+    if (!response.ok) {
+      const errText = await response.text();
+      logger.error("[CfeReceiptExtractorService] Error llamada Gemini Vision", {
+        status: response.status,
+        body: errText
+      });
+      return null;
+    }
+    const data = await response.json();
+    const rawJson = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!rawJson) return null;
+    try {
+      return JSON.parse(rawJson);
+    } catch {
+      logger.warn("[CfeReceiptExtractorService] Error al parsear JSON devuelto por Gemini");
+      return null;
+    }
+  }
+};
+
 // server/application/usecases/ReceiveMessageUseCase.ts
 var ReceiveMessageUseCase = class {
-  constructor(convRepo, orchestrator, sendWhatsApp, sendWhatsAppMedia2) {
+  constructor(convRepo, orchestrator, sendWhatsApp, sendWhatsAppMedia2, mediaService, extractorService) {
     this.convRepo = convRepo;
     this.orchestrator = orchestrator;
     this.sendWhatsApp = sendWhatsApp;
     this.sendWhatsAppMedia = sendWhatsAppMedia2;
+    this.mediaService = mediaService || new WhatsAppMediaService();
+    this.extractorService = extractorService || new CfeReceiptExtractorService();
   }
   async execute(input) {
     const tenantId = input.tenantId || AppConfig.tenant.defaultId;
     const phone = input.phone.replace(/[^\d]/g, "");
-    const text = input.text || "";
+    const rawText = input.text || "";
+    const text = rawText.trim();
     logger.info("[ReceiveMessageUseCase] Message received", {
       phone,
       tenantId,
       text: text.substring(0, 60),
-      isImage: Boolean(input.isImage)
+      isImage: Boolean(input.isImage),
+      mediaType: input.mediaType,
+      mediaId: input.mediaId
     });
-    if (input.isImage && (!text || !text.trim())) {
+    let extractedData = null;
+    if (input.mediaId) {
+      const downloadResult = await this.mediaService.downloadMedia(input.mediaId, input.mediaFilename);
+      if (!downloadResult.success) {
+        if ("error" in downloadResult && downloadResult.error === "size_exceeded") {
+          const sizeRejectReply = "El archivo que enviaste es demasiado pesado para procesarlo directamente por aqu\xED (m\xE1ximo 5 MB). \u{1F4C1} \xBFPodr\xEDas compartirme una foto m\xE1s ligera o indicarme el monto de tu recibo en texto?";
+          const conv = await this.convRepo.findByPhone(tenantId, phone);
+          conv.messages.push({
+            sender: "user",
+            text: `\u{1F4CE} [Archivo rechazado: ${input.mediaFilename || "Recibo"} - Tama\xF1o excede 5MB]`,
+            timestamp: (/* @__PURE__ */ new Date()).toISOString()
+          });
+          conv.messages.push({ sender: "bot", text: sizeRejectReply, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
+          conv.lastMessageAt = (/* @__PURE__ */ new Date()).toISOString();
+          await this.convRepo.save(conv);
+          await this.sendWhatsApp(phone, sizeRejectReply);
+          return { reply: sizeRejectReply, leadGenerated: false };
+        } else {
+          const fetchFailedReply = "Tuve un peque\xF1o problema al descargar tu archivo desde WhatsApp. \u{1F4C1} \xBFPodr\xEDas volver a envi\xE1rmelo o indicarme el monto aproximado de tu recibo en texto?";
+          const conv = await this.convRepo.findByPhone(tenantId, phone);
+          conv.messages.push({
+            sender: "user",
+            text: `\u{1F4CE} [Error al descargar archivo: ${input.mediaFilename || "Recibo"}]`,
+            timestamp: (/* @__PURE__ */ new Date()).toISOString()
+          });
+          conv.messages.push({ sender: "bot", text: fetchFailedReply, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
+          conv.lastMessageAt = (/* @__PURE__ */ new Date()).toISOString();
+          await this.convRepo.save(conv);
+          await this.sendWhatsApp(phone, fetchFailedReply);
+          return { reply: fetchFailedReply, leadGenerated: false };
+        }
+      } else {
+        extractedData = await this.extractorService.extractFromReceipt(
+          downloadResult.buffer,
+          downloadResult.mimeType,
+          downloadResult.filename
+        );
+        const conv = await this.convRepo.findByPhone(tenantId, phone);
+        if (!extractedData) {
+          const fallbackReply = "Recib\xED tu archivo, pero la imagen se ve un poco borrosa y no logro distinguir con certeza el monto total a pagar. Para no darte un c\xE1lculo incorrecto, \xBFme podr\xEDas confirmar la cantidad exacta que aparece en tu recibo?";
+          conv.messages.push({
+            sender: "user",
+            text: `\u{1F4CE} [Archivo adjuntado: ${input.mediaFilename || "Recibo CFE"} - Ilegible]`,
+            timestamp: (/* @__PURE__ */ new Date()).toISOString()
+          });
+          conv.messages.push({ sender: "bot", text: fallbackReply, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
+          conv.lastMessageAt = (/* @__PURE__ */ new Date()).toISOString();
+          await this.convRepo.save(conv);
+          await this.sendWhatsApp(phone, fallbackReply);
+          return { reply: fallbackReply, leadGenerated: false };
+        }
+        const mediaLabel = input.mediaType === "document" ? `\u{1F4C4} [Documento PDF analizado: ${input.mediaFilename || "Recibo CFE"} - $${extractedData.montoTotal.toLocaleString("es-MX")} MXN]` : `\u{1F4F7} [Foto de recibo analizada: $${extractedData.montoTotal.toLocaleString("es-MX")} MXN]`;
+        conv.messages.push({
+          sender: "user",
+          text: text ? `${mediaLabel} \u2014 "${text}"` : mediaLabel,
+          timestamp: (/* @__PURE__ */ new Date()).toISOString()
+        });
+        await this.convRepo.save(conv);
+      }
+    } else if (input.isImage && (!text || !text.trim())) {
       const fallbackReply = "He recibido tu imagen. Para asegurarme de leer el monto con total precisi\xF3n, \xBFpodr\xEDas confirmarme por favor el monto total en pesos que aparece en el recibo? \xA1Gracias!";
       const conv = await this.convRepo.findByPhone(tenantId, phone);
       conv.messages.push({ sender: "user", text: "\u{1F4F7} [Imagen de recibo adjuntada]", timestamp: (/* @__PURE__ */ new Date()).toISOString() });
@@ -593,11 +1004,19 @@ var ReceiveMessageUseCase = class {
       await this.sendWhatsApp(phone, fallbackReply);
       return { reply: fallbackReply, leadGenerated: false };
     }
+    const extractedBill = extractedData ? {
+      amount: extractedData.montoTotal,
+      frequency: extractedData.periodo,
+      tariff: extractedData.tarifa,
+      receiptSource: input.mediaType === "document" ? "pdf" : "image"
+    } : void 0;
+    const effectiveMessageText = text.length > 0 ? text : extractedBill ? `Adjunto mi recibo de luz de ${extractedBill.amount} pesos` : "";
     const result = await this.orchestrator.processMessage({
       tenantId,
       phone,
       userName: input.name,
-      messageText: text
+      messageText: effectiveMessageText,
+      extractedBill
     });
     if (result.replyText) {
       await this.sendWhatsApp(phone, result.replyText);
@@ -1520,6 +1939,23 @@ var SofiaFlowOrchestrator = class {
       previousSessionSummary = parts.length > 0 ? `Conversaci\xF3n previa: ${parts.join(", ")}.` : "El cliente ha interactuado previamente con Sof\xEDa.";
     }
     const currentStepInt = this.phaseToStepInt(conv.state.phase);
+    if (input.extractedBill && input.extractedBill.amount > 0) {
+      const extractedNorm = BillNormalizerService.normalize({
+        rawAmount: input.extractedBill.amount,
+        rawFrequency: input.extractedBill.frequency || "bimestral",
+        messageText: ""
+      });
+      if (extractedNorm) {
+        conv.state.monthlyBill = extractedNorm.monthlyBill;
+        conv.state.bimestralBill = extractedNorm.bimestralBill;
+        conv.state.billFrequency = extractedNorm.frequency;
+        conv.montoRecibo = extractedNorm.formattedSummary;
+        conv.state.equivalenceStated = true;
+      }
+      if (input.extractedBill.tariff) {
+        conv.state.tariff = input.extractedBill.tariff;
+      }
+    }
     const userMentionedBill = BillNormalizerService.preParseUserText(messageText);
     let preParsedBill = null;
     if (userMentionedBill) {
@@ -2559,6 +2995,10 @@ v2Router.get("/whatsapp-webhook", (req, res) => {
 v2Router.post("/whatsapp-webhook", async (req, res) => {
   let phone = "", text = "", name = "Cliente";
   let isImage = false;
+  let isMedia = false;
+  let mediaId;
+  let mediaType;
+  let mediaFilename;
   const body = req.body;
   try {
     if (body.entry?.[0]?.changes?.[0]?.value) {
@@ -2570,7 +3010,16 @@ v2Router.post("/whatsapp-webhook", async (req, res) => {
         phone = msg.from;
         if (msg.type === "image" || msg.image) {
           isImage = true;
+          isMedia = true;
+          mediaType = "image";
+          mediaId = msg.image?.id || msg.id;
           text = msg.image?.caption || msg.text?.body || "";
+        } else if (msg.type === "document" || msg.document) {
+          isMedia = true;
+          mediaType = "document";
+          mediaId = msg.document?.id || msg.id;
+          mediaFilename = msg.document?.filename || "Recibo.pdf";
+          text = msg.document?.caption || msg.text?.body || "";
         } else {
           text = msg.text?.body || msg.button?.text || msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || "";
         }
@@ -2591,6 +3040,8 @@ v2Router.post("/whatsapp-webhook", async (req, res) => {
         phone = messaging.sender?.id || "";
         if (messaging.message.attachments?.some((att) => att.type === "image")) {
           isImage = true;
+          isMedia = true;
+          mediaType = "image";
         }
         text = messaging.message.text || "";
         name = "Cliente Messenger";
@@ -2606,22 +3057,39 @@ v2Router.post("/whatsapp-webhook", async (req, res) => {
       text = body.Body || "";
       if (body.NumMedia && parseInt(body.NumMedia, 10) > 0) {
         isImage = true;
+        isMedia = true;
+        mediaType = "image";
       }
       name = body.ProfileName || "Cliente Twilio";
-    } else if (body.phone && (body.text || body.type === "image" || body.isImage)) {
+    } else if (body.phone && (body.text || body.type === "image" || body.isImage || body.type === "document")) {
       phone = body.phone;
       text = body.text || "";
       if (body.type === "image" || body.isImage) {
         isImage = true;
+        isMedia = true;
+        mediaType = "image";
+      } else if (body.type === "document") {
+        isMedia = true;
+        mediaType = "document";
+        mediaFilename = body.filename || "Recibo.pdf";
       }
+      mediaId = body.mediaId;
       name = body.name || "Cliente Simulado";
     }
-    if (!phone || !text && !isImage) {
-      logger.warn("[v2 Webhook] Missing phone or text/image, skipping");
+    if (!phone || !text && !isImage && !isMedia) {
+      logger.warn("[v2 Webhook] Missing phone or text/media, skipping");
       return res.status(200).json({ status: "received" });
     }
     const useCase = buildReceiveMessageUseCase();
-    await useCase.execute({ phone, text, name, isImage });
+    await useCase.execute({
+      phone,
+      text,
+      name,
+      isImage,
+      mediaId,
+      mediaType,
+      mediaFilename
+    });
   } catch (err) {
     logger.error("[v2 Webhook] Unhandled error", { error: err.message, stack: err.stack });
   }

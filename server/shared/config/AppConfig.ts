@@ -50,4 +50,15 @@ export const AppConfig = {
       fallbackWhatsapp: process.env.FALLBACK_AGENT_WA || '',
     };
   },
+  get gemini() {
+    return {
+      apiKey: process.env.GEMINI_API_KEY || '',
+      model: process.env.GEMINI_MODEL || 'gemini-2.0-flash',
+    };
+  },
+  get media() {
+    return {
+      maxSizeBytes: parseInt(process.env.MAX_MEDIA_SIZE_BYTES || '5242880', 10), // 5 MB Size Guard (Refinamiento 1: SSD)
+    };
+  },
 };

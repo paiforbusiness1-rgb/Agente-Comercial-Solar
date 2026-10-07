@@ -28,6 +28,12 @@ export interface OrchestrationInput {
   phone: string;
   userName?: string;
   messageText: string;
+  extractedBill?: {
+    amount: number;
+    frequency?: 'mensual' | 'bimestral';
+    tariff?: string;
+    receiptSource?: 'pdf' | 'image';
+  };
 }
 
 export interface OrchestrationOutput {
@@ -102,6 +108,24 @@ export class SofiaFlowOrchestrator {
     const currentStepInt = this.phaseToStepInt(conv.state.phase);
 
     // 2. Pre-Parse User Message for Bill Amount & Frequency (Single-Pass Zero-Latency)
+    if (input.extractedBill && input.extractedBill.amount > 0) {
+      const extractedNorm = BillNormalizerService.normalize({
+        rawAmount: input.extractedBill.amount,
+        rawFrequency: input.extractedBill.frequency || 'bimestral',
+        messageText: '',
+      });
+      if (extractedNorm) {
+        conv.state.monthlyBill = extractedNorm.monthlyBill;
+        conv.state.bimestralBill = extractedNorm.bimestralBill;
+        conv.state.billFrequency = extractedNorm.frequency;
+        (conv as any).montoRecibo = extractedNorm.formattedSummary;
+        conv.state.equivalenceStated = true;
+      }
+      if (input.extractedBill.tariff) {
+        (conv.state as any).tariff = input.extractedBill.tariff;
+      }
+    }
+
     const userMentionedBill = BillNormalizerService.preParseUserText(messageText);
     let preParsedBill: NormalizationResult | null = null;
     if (userMentionedBill) {
