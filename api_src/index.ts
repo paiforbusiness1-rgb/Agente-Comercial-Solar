@@ -44,6 +44,7 @@ function initFirebase() {
   if (getApps().length > 0) {
     const dbId = firebaseConfig.firestoreDatabaseId;
     db = dbId && dbId !== '(default)' ? getFirestore(dbId) : getFirestore();
+    initRepositories(db);
     return;
   }
 
@@ -53,7 +54,7 @@ function initFirebase() {
       const serviceAccount = JSON.parse(serviceAccountJson);
       initializeApp({
         credential: cert(serviceAccount),
-        projectId: firebaseConfig.projectId,
+        projectId: serviceAccount.project_id || firebaseConfig.projectId,
       });
       console.log('Firebase Admin SDK initialized from FIREBASE_SERVICE_ACCOUNT_JSON env var');
     } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
@@ -62,6 +63,7 @@ function initFirebase() {
     } else {
       console.warn('No Firebase Admin credentials found. Falling back to in-memory mode.');
       isInMemory = true;
+      initRepositories(null);
       return;
     }
     const dbId = firebaseConfig.firestoreDatabaseId;

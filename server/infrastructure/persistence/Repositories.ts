@@ -46,8 +46,9 @@ export class InMemoryConversationRepository implements IConversationRepository {
   }
 
   async softDelete(tenantId: string, phone: string, deletedBy: string): Promise<boolean> {
-    const conv = await this.findByPhone(tenantId, phone);
-    if (!conv) return false;
+    const key = `${tenantId}::${phone}`;
+    if (!chatsStore[key]) return false;
+    const conv = chatsStore[key];
     conv.status = 'deleted';
     conv.deletedAt = new Date().toISOString();
     conv.deletedBy = deletedBy;
@@ -56,8 +57,9 @@ export class InMemoryConversationRepository implements IConversationRepository {
   }
 
   async restore(tenantId: string, phone: string): Promise<boolean> {
-    const conv = await this.findByPhone(tenantId, phone);
-    if (!conv) return false;
+    const key = `${tenantId}::${phone}`;
+    if (!chatsStore[key] || chatsStore[key].status !== 'deleted') return false;
+    const conv = chatsStore[key];
     conv.status = 'active';
     conv.deletedAt = undefined;
     conv.deletedBy = undefined;

@@ -15,7 +15,7 @@ import { ReceiveMessageUseCase } from '../../application/usecases/ReceiveMessage
 import { SofiaFlowOrchestrator } from '../../application/orchestration/SofiaFlowOrchestrator.js';
 import { AppConfig } from '../../shared/config/AppConfig.js';
 import { logger } from '../../shared/logger/ConsoleLogger.js';
-import { getApps } from 'firebase-admin/app';
+import { getApps, initializeApp, cert } from 'firebase-admin/app';
 import { getFirestore } from 'firebase-admin/firestore';
 import nodemailer from 'nodemailer';
 
@@ -135,9 +135,27 @@ async function sendWhatsAppMedia(phone: string, mediaUrl: string, caption?: stri
   return false;
 }
 
+import { IConversationRepository } from '../../domain/repositories/IConversationRepository.js';
+import { ILeadRepository } from '../../domain/repositories/ILeadRepository.js';
+import { AgentRepository } from '../persistence/AgentRepository.js';
+
 // ─── Repository selection (lazy — evaluated per-request) ─────────────────
 function getRepos() {
   try {
+    // Si no está inicializado pero existe FIREBASE_SERVICE_ACCOUNT_JSON en entorno
+    if (getApps().length === 0 && process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+      try {
+        const sa = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+        initializeApp({
+          credential: cert(sa),
+          projectId: sa.project_id || 'agente-comercial-solar',
+        });
+        logger.info('[DI] Initialized Firebase Admin from FIREBASE_SERVICE_ACCOUNT_JSON in container');
+      } catch (saErr: any) {
+        logger.warn('[DI] Error parsing FIREBASE_SERVICE_ACCOUNT_JSON in container', { error: saErr.message });
+      }
+    }
+
     if (getApps().length > 0) {
       const db = getFirestore();
       logger.info('[DI] Using Firestore repositories (multi-tenant)');
@@ -156,11 +174,9 @@ function getRepos() {
   };
 }
 
-import { AgentRepository } from '../persistence/AgentRepository.js';
-
 let _db: any = null;
-let _convRepo: FirestoreConversationRepository | InMemoryConversationRepository | undefined;
-let _leadRepo: FirestoreLeadRepository | InMemoryLeadRepository | undefined;
+let _convRepo: IConversationRepository | undefined;
+let _leadRepo: ILeadRepository | undefined;
 let _agentRepo: AgentRepository | undefined;
 
 export function initRepositories(db: any | null) {
@@ -178,6 +194,28 @@ export function initRepositories(db: any | null) {
   }
 }
 
+export function getConvRepo(): IConversationRepository {
+  if (!_convRepo) {
+    const repos = getRepos();
+    _convRepo = repos.convRepo;
+    if (!_leadRepo) {
+      _leadRepo = repos.leadRepo;
+    }
+  }
+  return _convRepo;
+}
+
+export function getLeadRepo(): ILeadRepository {
+  if (!_leadRepo) {
+    const repos = getRepos();
+    _leadRepo = repos.leadRepo;
+    if (!_convRepo) {
+      _convRepo = repos.convRepo;
+    }
+  }
+  return _leadRepo;
+}
+
 export function getAgentRepo(): AgentRepository {
   if (!_agentRepo) {
     _agentRepo = new AgentRepository(_db || null);
@@ -185,13 +223,39 @@ export function getAgentRepo(): AgentRepository {
   return _agentRepo;
 }
 
+// ─── Proxies Defensivos (Anti-Crash / Zero-Undefined) ─────────────────────
+export const convRepo: IConversationRepository = new Proxy({} as IConversationRepository, {
+  get(_target, prop) {
+    const instance = getConvRepo();
+    const value = (instance as any)[prop];
+    return typeof value === 'function' ? value.bind(instance) : value;
+  },
+});
+
+export const leadRepo: ILeadRepository = new Proxy({} as ILeadRepository, {
+  get(_target, prop) {
+    const instance = getLeadRepo();
+    const value = (instance as any)[prop];
+    return typeof value === 'function' ? value.bind(instance) : value;
+  },
+});
+
+export const agentRepo: AgentRepository = new Proxy({} as AgentRepository, {
+  get(_target, prop) {
+    const instance = getAgentRepo();
+    const value = (instance as any)[prop];
+    return typeof value === 'function' ? value.bind(instance) : value;
+  },
+});
+
 // ─── Use Case Factory ─────────────────────────────────────────────────────
 export function buildReceiveMessageUseCase(): ReceiveMessageUseCase {
-  const repos = _convRepo && _leadRepo ? { convRepo: _convRepo, leadRepo: _leadRepo } : getRepos();
+  const currentConvRepo = getConvRepo();
+  const currentLeadRepo = getLeadRepo();
 
   const flowOrchestrator = new SofiaFlowOrchestrator(
-    repos.convRepo,
-    repos.leadRepo,
+    currentConvRepo,
+    currentLeadRepo,
     quoteEngine,
     llmProvider,
     sendWhatsAppMessage as any,
@@ -200,11 +264,9 @@ export function buildReceiveMessageUseCase(): ReceiveMessageUseCase {
   );
 
   return new ReceiveMessageUseCase(
-    repos.convRepo,
+    currentConvRepo,
     flowOrchestrator,
     sendWhatsAppMessage,
     sendWhatsAppMedia
   );
 }
-
-export { _convRepo as convRepo, _leadRepo as leadRepo, _agentRepo as agentRepo };

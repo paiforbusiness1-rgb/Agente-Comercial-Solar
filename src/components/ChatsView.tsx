@@ -121,7 +121,12 @@ export const ChatsView: React.FC<ChatsViewProps> = ({
         credentials: 'include',
       });
 
-      const data = await res.json();
+      let data: any = {};
+      try {
+        data = await res.json();
+      } catch {
+        // Fallback seguro si la respuesta no es JSON
+      }
 
       if (res.ok) {
         showToast(`🗑️ Chat de +${deleteIdentifier} archivado en la Papelera`);
@@ -152,7 +157,8 @@ export const ChatsView: React.FC<ChatsViewProps> = ({
         }
         fetchTrashChats();
       } else {
-        showToast(data.error || 'Error al archivar la conversación');
+        // Refinamiento 3: Cero eliminación optimista. El chat permanece visible y se emite Toast de error.
+        showToast(data.error || 'No se pudo archivar el chat. Inténtalo de nuevo.');
       }
     } catch (err: any) {
       showToast('Fallo de red al intentar archivar el chat');

@@ -1,6 +1,6 @@
 // api_src/index.ts
 import express from "express";
-import { initializeApp, getApps as getApps5, cert } from "firebase-admin/app";
+import { initializeApp as initializeApp2, getApps as getApps5, cert as cert2 } from "firebase-admin/app";
 import { getFirestore as getFirestore4 } from "firebase-admin/firestore";
 import nodemailer3 from "nodemailer";
 
@@ -326,8 +326,9 @@ var InMemoryConversationRepository = class {
     return Object.values(chatsStore).filter((c) => c.tenantId === tenantId && c.status === "deleted");
   }
   async softDelete(tenantId, phone, deletedBy) {
-    const conv = await this.findByPhone(tenantId, phone);
-    if (!conv) return false;
+    const key = `${tenantId}::${phone}`;
+    if (!chatsStore[key]) return false;
+    const conv = chatsStore[key];
     conv.status = "deleted";
     conv.deletedAt = (/* @__PURE__ */ new Date()).toISOString();
     conv.deletedBy = deletedBy;
@@ -335,8 +336,9 @@ var InMemoryConversationRepository = class {
     return true;
   }
   async restore(tenantId, phone) {
-    const conv = await this.findByPhone(tenantId, phone);
-    if (!conv) return false;
+    const key = `${tenantId}::${phone}`;
+    if (!chatsStore[key] || chatsStore[key].status !== "deleted") return false;
+    const conv = chatsStore[key];
     conv.status = "active";
     conv.deletedAt = void 0;
     conv.deletedBy = void 0;
@@ -914,8 +916,8 @@ Analiza la imagen o documento adjunto y extrae los datos de facturaci\xF3n estri
 
 // server/application/usecases/ReceiveMessageUseCase.ts
 var ReceiveMessageUseCase = class {
-  constructor(convRepo, orchestrator, sendWhatsApp, sendWhatsAppMedia2, mediaService, extractorService) {
-    this.convRepo = convRepo;
+  constructor(convRepo2, orchestrator, sendWhatsApp, sendWhatsAppMedia2, mediaService, extractorService) {
+    this.convRepo = convRepo2;
     this.orchestrator = orchestrator;
     this.sendWhatsApp = sendWhatsApp;
     this.sendWhatsAppMedia = sendWhatsAppMedia2;
@@ -1573,8 +1575,8 @@ var BillNormalizerService = class {
 // server/infrastructure/services/AgentNotificationService.ts
 import nodemailer from "nodemailer";
 var AgentNotificationService = class {
-  constructor(agentRepo) {
-    this.agentRepo = agentRepo;
+  constructor(agentRepo2) {
+    this.agentRepo = agentRepo2;
   }
   // ─── Agent Assignment (Round-Robin by assignedLeadsCount) ──────────────────
   async getAssignedAgent(tenantId) {
@@ -1902,9 +1904,9 @@ var AgentRepository = class {
 
 // server/application/orchestration/SofiaFlowOrchestrator.ts
 var SofiaFlowOrchestrator = class {
-  constructor(conversationRepo, leadRepo, quoteEngine2, llmProvider2, sendWhatsAppText, emailService2, db2) {
+  constructor(conversationRepo, leadRepo2, quoteEngine2, llmProvider2, sendWhatsAppText, emailService2, db2) {
     this.conversationRepo = conversationRepo;
-    this.leadRepo = leadRepo;
+    this.leadRepo = leadRepo2;
     this.quoteEngine = quoteEngine2;
     this.llmProvider = llmProvider2;
     this.sendWhatsAppText = sendWhatsAppText;
@@ -2256,8 +2258,8 @@ Mientras me pasas el dato, te comparto informaci\xF3n detallada de nuestro servi
         createdAt: (/* @__PURE__ */ new Date()).toISOString()
       };
       await this.leadRepo.save(lead);
-      const agentRepo = new AgentRepository(this.db);
-      const notificationService = new AgentNotificationService(agentRepo);
+      const agentRepo2 = new AgentRepository(this.db);
+      const notificationService = new AgentNotificationService(agentRepo2);
       const agent = await notificationService.getAssignedAgent(conv.tenantId);
       const prospect = {
         nombre: name,
@@ -2287,7 +2289,7 @@ Mientras me pasas el dato, te comparto informaci\xF3n detallada de nuestro servi
 };
 
 // server/infrastructure/web/container.ts
-import { getApps as getApps2 } from "firebase-admin/app";
+import { getApps as getApps2, initializeApp, cert } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 import nodemailer2 from "nodemailer";
 var quoteEngine = new SolarQuoteEngine();
@@ -2401,6 +2403,18 @@ async function sendWhatsAppMedia(phone, mediaUrl, caption) {
 }
 function getRepos() {
   try {
+    if (getApps2().length === 0 && process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+      try {
+        const sa = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
+        initializeApp({
+          credential: cert(sa),
+          projectId: sa.project_id || "agente-comercial-solar"
+        });
+        logger.info("[DI] Initialized Firebase Admin from FIREBASE_SERVICE_ACCOUNT_JSON in container");
+      } catch (saErr) {
+        logger.warn("[DI] Error parsing FIREBASE_SERVICE_ACCOUNT_JSON in container", { error: saErr.message });
+      }
+    }
     if (getApps2().length > 0) {
       const db2 = getFirestore();
       logger.info("[DI] Using Firestore repositories (multi-tenant)");
@@ -2436,17 +2450,59 @@ function initRepositories(db2) {
     _agentRepo = new AgentRepository(null);
   }
 }
+function getConvRepo() {
+  if (!_convRepo) {
+    const repos = getRepos();
+    _convRepo = repos.convRepo;
+    if (!_leadRepo) {
+      _leadRepo = repos.leadRepo;
+    }
+  }
+  return _convRepo;
+}
+function getLeadRepo() {
+  if (!_leadRepo) {
+    const repos = getRepos();
+    _leadRepo = repos.leadRepo;
+    if (!_convRepo) {
+      _convRepo = repos.convRepo;
+    }
+  }
+  return _leadRepo;
+}
 function getAgentRepo() {
   if (!_agentRepo) {
     _agentRepo = new AgentRepository(_db || null);
   }
   return _agentRepo;
 }
+var convRepo = new Proxy({}, {
+  get(_target, prop) {
+    const instance = getConvRepo();
+    const value = instance[prop];
+    return typeof value === "function" ? value.bind(instance) : value;
+  }
+});
+var leadRepo = new Proxy({}, {
+  get(_target, prop) {
+    const instance = getLeadRepo();
+    const value = instance[prop];
+    return typeof value === "function" ? value.bind(instance) : value;
+  }
+});
+var agentRepo = new Proxy({}, {
+  get(_target, prop) {
+    const instance = getAgentRepo();
+    const value = instance[prop];
+    return typeof value === "function" ? value.bind(instance) : value;
+  }
+});
 function buildReceiveMessageUseCase() {
-  const repos = _convRepo && _leadRepo ? { convRepo: _convRepo, leadRepo: _leadRepo } : getRepos();
+  const currentConvRepo = getConvRepo();
+  const currentLeadRepo = getLeadRepo();
   const flowOrchestrator = new SofiaFlowOrchestrator(
-    repos.convRepo,
-    repos.leadRepo,
+    currentConvRepo,
+    currentLeadRepo,
     quoteEngine,
     llmProvider,
     sendWhatsAppMessage,
@@ -2454,7 +2510,7 @@ function buildReceiveMessageUseCase() {
     _db
   );
   return new ReceiveMessageUseCase(
-    repos.convRepo,
+    currentConvRepo,
     flowOrchestrator,
     sendWhatsAppMessage,
     sendWhatsAppMedia
@@ -3098,7 +3154,7 @@ v2Router.post("/whatsapp-webhook", async (req, res) => {
 v2Router.get("/chats", requireAuth, async (req, res) => {
   const tenantId = req.query.tenantId || AppConfig.tenant.defaultId;
   try {
-    const chats = await _convRepo.findAll(tenantId);
+    const chats = await convRepo.findAll(tenantId);
     return res.json(chats);
   } catch (err) {
     return res.status(500).json({ error: err.message });
@@ -3107,7 +3163,7 @@ v2Router.get("/chats", requireAuth, async (req, res) => {
 v2Router.get("/chats/trash", requireAuth, requireRole(["admin", "agent"]), async (req, res) => {
   const tenantId = req.query.tenantId || AppConfig.tenant.defaultId;
   try {
-    const trashedChats = await _convRepo.findTrash(tenantId);
+    const trashedChats = await convRepo.findTrash(tenantId);
     return res.json(trashedChats);
   } catch (err) {
     return res.status(500).json({ error: err.message });
@@ -3118,7 +3174,7 @@ v2Router.delete("/chats/:phone", requireAuth, requireRole(["admin"]), async (req
   const tenantId = req.query.tenantId || req.body?.tenantId || AppConfig.tenant.defaultId;
   const ip = getClientIp(req);
   try {
-    const success = await _convRepo.softDelete(tenantId, phone, req.user.email);
+    const success = await convRepo.softDelete(tenantId, phone, req.user.email);
     if (!success) {
       return res.status(404).json({ error: "Chat no encontrado para archivar" });
     }
@@ -3141,7 +3197,7 @@ v2Router.post("/chats/:phone/restore", requireAuth, requireRole(["admin"]), asyn
   const tenantId = req.query.tenantId || req.body?.tenantId || AppConfig.tenant.defaultId;
   const ip = getClientIp(req);
   try {
-    const success = await _convRepo.restore(tenantId, phone);
+    const success = await convRepo.restore(tenantId, phone);
     if (!success) {
       return res.status(404).json({ error: "Chat no encontrado para restaurar" });
     }
@@ -3164,7 +3220,7 @@ v2Router.post("/chats/purge-expired", requireAuth, requireRole(["admin"]), async
   const retentionDays = parseInt(req.query.retentionDays || req.body?.retentionDays || "30", 10);
   const ip = getClientIp(req);
   try {
-    const purgedCount = await _convRepo.purgeExpiredTrash(tenantId, retentionDays);
+    const purgedCount = await convRepo.purgeExpiredTrash(tenantId, retentionDays);
     if (purgedCount > 0) {
       await AuditLogService.logEvent({
         eventType: "TRASH_PURGED",
@@ -3202,9 +3258,9 @@ v2Router.post("/chats/:phone/toggle-bot", requireAuth, async (req, res) => {
   const { bot_disabled } = req.body;
   const tenantId = req.body.tenantId || AppConfig.tenant.defaultId;
   try {
-    const conv = await _convRepo.findByPhone(tenantId, phone);
+    const conv = await convRepo.findByPhone(tenantId, phone);
     conv.botDisabled = bot_disabled;
-    await _convRepo.save(conv);
+    await convRepo.save(conv);
     return res.json({ success: true, conv });
   } catch (err) {
     return res.status(500).json({ error: err.message });
@@ -3216,11 +3272,11 @@ v2Router.post("/chats/:phone/message", requireAuth, async (req, res) => {
   const tenantId = req.body.tenantId || AppConfig.tenant.defaultId;
   if (!text) return res.status(400).json({ error: "Text is required" });
   try {
-    const conv = await _convRepo.findByPhone(tenantId, phone);
+    const conv = await convRepo.findByPhone(tenantId, phone);
     conv.messages.push({ sender: "agent", text, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
     conv.lastMessageAt = (/* @__PURE__ */ new Date()).toISOString();
     conv.botDisabled = true;
-    await _convRepo.save(conv);
+    await convRepo.save(conv);
     const { accessToken, phoneNumberId } = AppConfig.meta;
     if (accessToken && phoneNumberId) {
       await fetch(`https://graph.facebook.com/v20.0/${phoneNumberId}/messages`, {
@@ -3239,8 +3295,8 @@ v2Router.post("/copilot/query", requireAuth, async (req, res) => {
   const tenantId = req.body.tenantId || AppConfig.tenant.defaultId;
   if (!question) return res.status(400).json({ error: "Falta la pregunta" });
   try {
-    const leads = await _leadRepo.findAll(tenantId);
-    const chats = await _convRepo.findAll(tenantId);
+    const leads = await leadRepo.findAll(tenantId);
+    const chats = await convRepo.findAll(tenantId);
     const databaseContext = {
       qualified_leads: leads,
       chats_metadata: chats.map((c) => ({ phone: c.phone, nombre: c.nombre, phase: c.state.phase, botDisabled: c.botDisabled, lastMessageAt: c.lastMessageAt })),
@@ -3267,7 +3323,7 @@ v2Router.post("/copilot/query", requireAuth, async (req, res) => {
 v2Router.get("/leads", requireAuth, async (req, res) => {
   const tenantId = req.query.tenantId || AppConfig.tenant.defaultId;
   try {
-    const leads = await _leadRepo.findAll(tenantId);
+    const leads = await leadRepo.findAll(tenantId);
     return res.json(leads);
   } catch (err) {
     return res.status(500).json({ error: err.message });
@@ -3277,7 +3333,7 @@ v2Router.post("/leads/:id/contacted", requireAuth, async (req, res) => {
   const { id } = req.params;
   const tenantId = req.body.tenantId || AppConfig.tenant.defaultId;
   try {
-    await _leadRepo.updateStatus(tenantId, id, "contacted");
+    await leadRepo.updateStatus(tenantId, id, "contacted");
     return res.json({ success: true });
   } catch (err) {
     return res.status(500).json({ error: err.message });
@@ -3288,7 +3344,7 @@ v2Router.post("/leads/:id/notes", requireAuth, async (req, res) => {
   const { private_notes, tenantId } = req.body;
   const tenant = tenantId || AppConfig.tenant.defaultId;
   try {
-    await _leadRepo.updateNotes(tenant, id, private_notes);
+    await leadRepo.updateNotes(tenant, id, private_notes);
     return res.json({ success: true });
   } catch (err) {
     return res.status(500).json({ error: err.message });
@@ -3300,8 +3356,8 @@ v2Router.post("/reset-demo", requireAuth, async (req, res) => {
 v2Router.get("/agents", requireAuth, async (req, res) => {
   try {
     const tenantId = req.query.tenantId || AppConfig.tenant.defaultId;
-    const agentRepo = getAgentRepo();
-    const agents = await agentRepo.findAll(tenantId);
+    const agentRepo2 = getAgentRepo();
+    const agents = await agentRepo2.findAll(tenantId);
     const masked = agents.map((a) => ({
       ...a,
       whatsappPhone: a.whatsappPhone ? a.whatsappPhone.length > 4 ? a.whatsappPhone.slice(0, -4).replace(/./g, "*") + a.whatsappPhone.slice(-4) : a.whatsappPhone : ""
@@ -3319,8 +3375,8 @@ v2Router.post("/agents", requireAuth, requireRole(["admin"]), async (req, res) =
       return res.status(400).json({ error: "name y email son obligatorios" });
     }
     const tenantId = req.body.tenantId || AppConfig.tenant.defaultId;
-    const agentRepo = getAgentRepo();
-    const agent = await agentRepo.save({
+    const agentRepo2 = getAgentRepo();
+    const agent = await agentRepo2.save({
       name: String(name).trim(),
       email: String(email).trim().toLowerCase(),
       whatsappPhone: String(whatsappPhone || "").trim().replace(/\D/g, ""),
@@ -3348,10 +3404,10 @@ v2Router.put("/agents/:agentId", requireAuth, requireRole(["admin"]), async (req
     const { agentId } = req.params;
     const { name, email, whatsappPhone, isActive } = req.body || {};
     const tenantId = req.body.tenantId || AppConfig.tenant.defaultId;
-    const agentRepo = getAgentRepo();
-    const existing = await agentRepo.findById(tenantId, agentId);
+    const agentRepo2 = getAgentRepo();
+    const existing = await agentRepo2.findById(tenantId, agentId);
     if (!existing) return res.status(404).json({ error: "Agente no encontrado" });
-    const updated = await agentRepo.save({
+    const updated = await agentRepo2.save({
       ...existing,
       name: name ? String(name).trim() : existing.name,
       email: email ? String(email).trim().toLowerCase() : existing.email,
@@ -3377,8 +3433,8 @@ v2Router.delete("/agents/:agentId", requireAuth, requireRole(["admin"]), async (
   try {
     const { agentId } = req.params;
     const tenantId = req.query.tenantId || req.body.tenantId || AppConfig.tenant.defaultId;
-    const agentRepo = getAgentRepo();
-    const deleted = await agentRepo.delete(tenantId, agentId);
+    const agentRepo2 = getAgentRepo();
+    const deleted = await agentRepo2.delete(tenantId, agentId);
     if (!deleted) return res.status(404).json({ error: "Agente no encontrado" });
     await AuditLogService.logEvent({
       eventType: "AGENT_DELETED",
@@ -3486,23 +3542,25 @@ function initFirebase() {
   if (getApps5().length > 0) {
     const dbId = firebaseConfig.firestoreDatabaseId;
     db = dbId && dbId !== "(default)" ? getFirestore4(dbId) : getFirestore4();
+    initRepositories(db);
     return;
   }
   try {
     const serviceAccountJson = process.env.FIREBASE_SERVICE_ACCOUNT_JSON;
     if (serviceAccountJson) {
       const serviceAccount = JSON.parse(serviceAccountJson);
-      initializeApp({
-        credential: cert(serviceAccount),
-        projectId: firebaseConfig.projectId
+      initializeApp2({
+        credential: cert2(serviceAccount),
+        projectId: serviceAccount.project_id || firebaseConfig.projectId
       });
       console.log("Firebase Admin SDK initialized from FIREBASE_SERVICE_ACCOUNT_JSON env var");
     } else if (process.env.GOOGLE_APPLICATION_CREDENTIALS) {
-      initializeApp({ projectId: firebaseConfig.projectId });
+      initializeApp2({ projectId: firebaseConfig.projectId });
       console.log("Firebase Admin SDK initialized using GOOGLE_APPLICATION_CREDENTIALS");
     } else {
       console.warn("No Firebase Admin credentials found. Falling back to in-memory mode.");
       isInMemory = true;
+      initRepositories(null);
       return;
     }
     const dbId = firebaseConfig.firestoreDatabaseId;
