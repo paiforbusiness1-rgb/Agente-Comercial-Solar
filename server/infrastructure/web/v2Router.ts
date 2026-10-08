@@ -197,10 +197,12 @@ v2Router.get('/health', (_req: Request, res: Response) => {
 v2Router.get('/ready', (_req: Request, res: Response) => {
   const groqConfigured = !!AppConfig.groq.apiKey;
   const metaConfigured = !!AppConfig.meta.accessToken;
+  const geminiConfigured = !!AppConfig.gemini.apiKey;
   res.status(groqConfigured ? 200 : 503).json({
     ready: groqConfigured,
     services: {
       groq: groqConfigured ? 'ok' : 'missing_api_key',
+      gemini: geminiConfigured ? 'ok' : 'missing_api_key',
       whatsapp: metaConfigured ? 'ok' : 'simulation_mode',
       smtp: !!AppConfig.smtp.pass ? 'ok' : 'simulation_mode',
     },

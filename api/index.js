@@ -739,7 +739,8 @@ var CfeReceiptExtractorService = class {
       filename,
       sizeBytes: buffer.length
     });
-    const isPdf = mimeType === "application/pdf" || filename && filename.toLowerCase().endsWith(".pdf");
+    const effectiveMimeType = this.normalizeMimeType(buffer, mimeType, filename);
+    const isPdf = effectiveMimeType === "application/pdf";
     if (isPdf) {
       try {
         const text = await this.pdfParserFn(buffer);
@@ -764,7 +765,7 @@ var CfeReceiptExtractorService = class {
       }
     }
     try {
-      const visionResult = await this.callVisionModel(buffer, mimeType);
+      const visionResult = await this.callVisionModel(buffer, effectiveMimeType);
       if (!visionResult) {
         return null;
       }
@@ -843,7 +844,38 @@ var CfeReceiptExtractorService = class {
     };
   }
   /**
-   * Invoca a Gemini 2.0 Flash Multimodal para procesar fotos de recibo
+   * Normaliza el MIME type usando magic bytes del buffer o extensión de archivo.
+   * Evita rechazos de Gemini (ej: application/octet-stream -> image/jpeg)
+   */
+  normalizeMimeType(buffer, mimeType, filename) {
+    if (buffer && buffer.length >= 4) {
+      if (buffer[0] === 37 && buffer[1] === 80 && buffer[2] === 68 && buffer[3] === 70) {
+        return "application/pdf";
+      }
+      if (buffer[0] === 255 && buffer[1] === 216 && buffer[2] === 255) {
+        return "image/jpeg";
+      }
+      if (buffer[0] === 137 && buffer[1] === 80 && buffer[2] === 78 && buffer[3] === 71) {
+        return "image/png";
+      }
+      if (buffer[0] === 82 && buffer[1] === 73 && buffer[2] === 70 && buffer[3] === 70) {
+        return "image/webp";
+      }
+    }
+    if (filename) {
+      const lower = filename.toLowerCase();
+      if (lower.endsWith(".pdf")) return "application/pdf";
+      if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
+      if (lower.endsWith(".png")) return "image/png";
+      if (lower.endsWith(".webp")) return "image/webp";
+    }
+    if (mimeType && mimeType !== "application/octet-stream") {
+      return mimeType;
+    }
+    return "image/jpeg";
+  }
+  /**
+   * Invoca a Gemini Flash Multimodal para procesar fotos de recibo
    */
   async callVisionModel(buffer, mimeType) {
     if (this.geminiVisionFn) {
@@ -3029,10 +3061,12 @@ v2Router.get("/health", (_req, res) => {
 v2Router.get("/ready", (_req, res) => {
   const groqConfigured = !!AppConfig.groq.apiKey;
   const metaConfigured = !!AppConfig.meta.accessToken;
+  const geminiConfigured = !!AppConfig.gemini.apiKey;
   res.status(groqConfigured ? 200 : 503).json({
     ready: groqConfigured,
     services: {
       groq: groqConfigured ? "ok" : "missing_api_key",
+      gemini: geminiConfigured ? "ok" : "missing_api_key",
       whatsapp: metaConfigured ? "ok" : "simulation_mode",
       smtp: !!AppConfig.smtp.pass ? "ok" : "simulation_mode"
     }
