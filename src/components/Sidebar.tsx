@@ -280,7 +280,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <span className="text-slate-550">Gemini Engine:</span>
             <span className={`font-medium flex items-center ${isDarkMode ? 'text-emerald-400' : 'text-emerald-600'}`}>
               <Server className="h-3 w-3 mr-1" />
-              gemini-2.0-flash
+              gemini-2.5-flash
             </span>
           </div>
           <div className="flex items-center justify-between text-[10px] font-mono">

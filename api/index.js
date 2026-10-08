@@ -67,7 +67,7 @@ var AppConfig = {
   get gemini() {
     return {
       apiKey: process.env.GEMINI_API_KEY || "",
-      model: process.env.GEMINI_MODEL || "gemini-2.0-flash"
+      model: process.env.GEMINI_MODEL || "gemini-2.5-flash"
     };
   },
   get media() {
@@ -854,7 +854,7 @@ var CfeReceiptExtractorService = class {
       logger.warn("[CfeReceiptExtractorService] GEMINI_API_KEY no configurada para visi\xF3n");
       return null;
     }
-    const model = AppConfig.gemini.model || "gemini-2.0-flash";
+    const model = AppConfig.gemini.model || "gemini-2.5-flash";
     const systemPrompt = `Eres un perito experto en an\xE1lisis forense de facturas de energ\xEDa el\xE9ctrica de la Comisi\xF3n Federal de Electricidad (CFE) en M\xE9xico.
 Analiza la imagen o documento adjunto y extrae los datos de facturaci\xF3n estrictamente en formato JSON v\xE1lido con este esquema:
 {

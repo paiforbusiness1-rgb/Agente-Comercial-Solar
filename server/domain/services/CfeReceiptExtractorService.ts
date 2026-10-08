@@ -219,7 +219,7 @@ export class CfeReceiptExtractorService {
       return null;
     }
 
-    const model = AppConfig.gemini.model || 'gemini-2.0-flash';
+    const model = AppConfig.gemini.model || 'gemini-2.5-flash';
     const systemPrompt = `Eres un perito experto en análisis forense de facturas de energía eléctrica de la Comisión Federal de Electricidad (CFE) en México.
 Analiza la imagen o documento adjunto y extrae los datos de facturación estrictamente en formato JSON válido con este esquema:
 {
