@@ -188,29 +188,112 @@ var GroqProvider = class {
   }
 };
 
+// server/infrastructure/llm/LLMCircuitBreaker.ts
+var LLMCircuitBreaker = class {
+  constructor(config) {
+    this.state = "CLOSED";
+    this.consecutiveFailures = 0;
+    this.lastFailureTime = 0;
+    this.name = config.name;
+    this.failureThreshold = config.failureThreshold ?? 2;
+    this.cooldownMs = config.cooldownMs ?? 6e4;
+  }
+  getState() {
+    if (this.state === "OPEN") {
+      const now = Date.now();
+      if (now - this.lastFailureTime >= this.cooldownMs) {
+        this.state = "HALF_OPEN";
+        logger.info(`[CircuitBreaker:${this.name}] Cooldown de ${this.cooldownMs}ms expirado. Transici\xF3n a HALF_OPEN para sonda.`);
+      }
+    }
+    return this.state;
+  }
+  isOpen() {
+    return this.getState() === "OPEN";
+  }
+  isAvailable() {
+    const s = this.getState();
+    return s === "CLOSED" || s === "HALF_OPEN";
+  }
+  recordSuccess() {
+    if (this.state !== "CLOSED") {
+      logger.info(`[CircuitBreaker:${this.name}] Sonda exitosa. Circuito restablecido a CLOSED.`);
+    }
+    this.state = "CLOSED";
+    this.consecutiveFailures = 0;
+    this.lastFailureTime = 0;
+  }
+  recordFailure(err) {
+    this.consecutiveFailures++;
+    this.lastFailureTime = Date.now();
+    logger.warn(`[CircuitBreaker:${this.name}] Falla registrada (#${this.consecutiveFailures}/${this.failureThreshold})`, {
+      error: err?.message || String(err),
+      state: this.state
+    });
+    if (this.state === "HALF_OPEN" || this.consecutiveFailures >= this.failureThreshold) {
+      this.state = "OPEN";
+      logger.error(`[CircuitBreaker:${this.name}] UMBRAL ALCANZADO. Circuito pasa a OPEN. Desv\xEDo proactivo activado por ${this.cooldownMs}ms.`);
+    }
+  }
+  reset() {
+    this.state = "CLOSED";
+    this.consecutiveFailures = 0;
+    this.lastFailureTime = 0;
+  }
+};
+
 // server/infrastructure/llm/ResilientLLMProvider.ts
 var ResilientLLMProvider = class {
-  constructor(groqProvider, customFetch, geminiTimeoutMs = 7e3) {
+  constructor(groqProvider, customFetch, geminiTimeoutMs = 7e3, circuitBreakers) {
     this.customFetch = customFetch;
     this.geminiTimeoutMs = geminiTimeoutMs;
     this.geminiEndpoint = "https://generativelanguage.googleapis.com/v1beta/models";
     this.groqProvider = groqProvider || new GroqProvider();
+    this.groqCircuit = circuitBreakers?.groq || new LLMCircuitBreaker({ name: "Groq", failureThreshold: 2, cooldownMs: 6e4 });
+    this.geminiCircuit = circuitBreakers?.gemini || new LLMCircuitBreaker({ name: "Gemini", failureThreshold: 2, cooldownMs: 6e4 });
   }
   async complete(messages, tools, temperature = 0.2) {
     const phoneMatch = messages.find((m) => m.content && m.content.includes("<phone>"))?.content.match(/<phone>([^<]+)<\/phone>/);
     const phone = phoneMatch ? phoneMatch[1].trim() : "unknown";
-    try {
-      return await this.groqProvider.complete(messages, tools, temperature);
-    } catch (groqErr) {
-      logger.warn(
-        `[ResilientLLM] Groq timeout/failure detected. Failing over to Gemini 2.5 Flash for phone: ${phone}`,
-        { error: groqErr.message, phone }
+    if (!this.groqCircuit.isOpen()) {
+      try {
+        const result = await this.groqProvider.complete(messages, tools, temperature);
+        this.groqCircuit.recordSuccess();
+        return result;
+      } catch (groqErr) {
+        this.groqCircuit.recordFailure(groqErr);
+        logger.warn(
+          `[ResilientLLM] Groq timeout/failure detected. Failing over to Gemini 2.5 Flash for phone: ${phone}`,
+          { error: groqErr.message, phone, groqCircuitState: this.groqCircuit.getState() }
+        );
+      }
+    } else {
+      logger.info(
+        `[ResilientLLM] Groq circuit is OPEN. Fail-fast (0ms) direct failover to Gemini for phone: ${phone}`,
+        { phone }
       );
-      return await this.callGeminiFallback(messages, temperature);
     }
+    if (!this.geminiCircuit.isOpen()) {
+      try {
+        const geminiResult = await this.callGeminiFallback(messages, temperature);
+        this.geminiCircuit.recordSuccess();
+        return geminiResult;
+      } catch (geminiErr) {
+        this.geminiCircuit.recordFailure(geminiErr);
+        logger.error("[ResilientLLM] Gemini fallback also failed", {
+          error: geminiErr.message,
+          phone,
+          geminiCircuitState: this.geminiCircuit.getState()
+        });
+        throw geminiErr;
+      }
+    }
+    const outageErr = new Error("[ResilientLLM] Both Groq and Gemini circuits are OPEN. Complete infrastructure outage.");
+    logger.error(outageErr.message, { phone });
+    throw outageErr;
   }
   async callGeminiFallback(messages, temperature = 0.2) {
-    const apiKey = AppConfig.gemini.apiKey;
+    const apiKey = AppConfig.gemini.apiKey || (this.customFetch ? "mock-gemini-test-key" : "");
     if (!apiKey) {
       throw new Error("[ResilientLLM] GEMINI_API_KEY no configurada. Fallback no disponible.");
     }
@@ -253,9 +336,6 @@ var ResilientLLMProvider = class {
         finishReason: "stop"
       };
     } catch (geminiErr) {
-      logger.error("[ResilientLLM] Both Groq and Gemini failed", {
-        error: geminiErr.message
-      });
       throw geminiErr;
     }
   }
@@ -376,21 +456,28 @@ var defaultState = () => ({
 var InMemoryConversationRepository = class {
   async findByPhone(tenantId, phone) {
     const key = `${tenantId}::${phone}`;
-    if (!chatsStore[key]) {
-      chatsStore[key] = {
-        id: phone,
-        tenantId,
-        phone,
-        nombre: "Cliente",
-        botDisabled: false,
-        messages: [],
-        state: defaultState(),
-        lastMessageAt: (/* @__PURE__ */ new Date()).toISOString(),
-        createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-        status: "active"
-      };
+    const existing = chatsStore[key];
+    if (existing) {
+      if (existing.status === "deleted") {
+        existing.status = "active";
+        delete existing.deletedAt;
+        delete existing.deletedBy;
+        existing.restoredAt = (/* @__PURE__ */ new Date()).toISOString();
+      }
+      return JSON.parse(JSON.stringify(existing));
     }
-    return JSON.parse(JSON.stringify(chatsStore[key]));
+    return {
+      id: phone,
+      tenantId,
+      phone,
+      nombre: "Cliente",
+      botDisabled: false,
+      messages: [],
+      state: defaultState(),
+      lastMessageAt: (/* @__PURE__ */ new Date()).toISOString(),
+      createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+      status: "active"
+    };
   }
   async save(conversation) {
     const key = `${conversation.tenantId}::${conversation.phone}`;
@@ -489,10 +576,73 @@ var FirestoreConversationRepository = class {
   }
   async findByPhone(tenantId, phone) {
     try {
-      const docRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
-      const doc = await docRef.get();
-      if (!doc.exists) {
-        const conv = {
+      if (this.db && typeof this.db.runTransaction === "function") {
+        return await this.db.runTransaction(async (transaction) => {
+          const chatRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
+          const trashRef = this.db.collection(`tenants/${tenantId}/deleted_chats`).doc(phone);
+          const [chatDoc, trashDoc] = await Promise.all([
+            transaction.get(chatRef),
+            transaction.get(trashRef)
+          ]);
+          if (chatDoc.exists) {
+            return { id: chatDoc.id, status: "active", ...chatDoc.data() };
+          }
+          if (trashDoc.exists) {
+            const trashedData = trashDoc.data() || {};
+            const restoredConv = {
+              ...trashedData,
+              id: phone,
+              phone,
+              tenantId,
+              status: "active",
+              restoredAt: (/* @__PURE__ */ new Date()).toISOString()
+            };
+            delete restoredConv.deletedAt;
+            delete restoredConv.deletedBy;
+            transaction.set(chatRef, restoredConv);
+            transaction.delete(trashRef);
+            logger.info(`[FirestoreConversationRepo] Restored chat ${phone} atomically from deleted_chats in runTransaction`);
+            return restoredConv;
+          }
+          return {
+            id: phone,
+            tenantId,
+            phone,
+            nombre: "Cliente",
+            botDisabled: false,
+            messages: [],
+            state: defaultState(),
+            lastMessageAt: (/* @__PURE__ */ new Date()).toISOString(),
+            createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+            status: "active"
+          };
+        });
+      } else {
+        const chatRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
+        const doc = await chatRef.get();
+        if (doc.exists) {
+          return { id: doc.id, status: "active", ...doc.data() };
+        }
+        const trashRef = this.db.collection(`tenants/${tenantId}/deleted_chats`).doc(phone);
+        const trashDoc = await trashRef.get();
+        if (trashDoc.exists) {
+          const trashedData = trashDoc.data() || {};
+          const restoredConv = {
+            ...trashedData,
+            id: phone,
+            phone,
+            tenantId,
+            status: "active",
+            restoredAt: (/* @__PURE__ */ new Date()).toISOString()
+          };
+          delete restoredConv.deletedAt;
+          delete restoredConv.deletedBy;
+          await chatRef.set(restoredConv);
+          await trashRef.delete();
+          logger.info(`[FirestoreConversationRepo] Restored chat ${phone} from deleted_chats to chats (no tx)`);
+          return restoredConv;
+        }
+        return {
           id: phone,
           tenantId,
           phone,
@@ -504,10 +654,7 @@ var FirestoreConversationRepository = class {
           createdAt: (/* @__PURE__ */ new Date()).toISOString(),
           status: "active"
         };
-        await docRef.set(conv);
-        return conv;
       }
-      return { id: doc.id, status: "active", ...doc.data() };
     } catch (err) {
       logger.warn("[FirestoreConversationRepo] Fallback to In-Memory due to Firestore error", { error: err.message });
       return inMemoryConvFallback.findByPhone(tenantId, phone);
@@ -1522,14 +1669,45 @@ var ReceiveMessageUseCase = class {
       bothPagesAnalyzed
     } : void 0;
     const effectiveMessageText = text.length > 0 ? text : extractedBill ? `Adjunto mi recibo de luz de ${extractedBill.amount} pesos` : "";
-    const result = await this.orchestrator.processMessage({
-      tenantId,
-      phone,
-      userName: input.name,
-      messageText: effectiveMessageText,
-      inboundTimestamp,
-      extractedBill
-    });
+    const lastMsg = currentConv.messages[currentConv.messages.length - 1];
+    const alreadySaved = lastMsg && lastMsg.sender === "user" && lastMsg.timestamp === inboundTimestamp;
+    if (!alreadySaved && effectiveMessageText) {
+      currentConv.messages.push({
+        sender: "user",
+        text: effectiveMessageText,
+        timestamp: inboundTimestamp
+      });
+      currentConv.lastMessageAt = inboundTimestamp;
+      await this.convRepo.save(currentConv);
+    }
+    let result;
+    try {
+      result = await this.orchestrator.processMessage({
+        tenantId,
+        phone,
+        userName: input.name,
+        messageText: effectiveMessageText,
+        inboundTimestamp,
+        extractedBill
+      });
+    } catch (llmErr) {
+      logger.error("[ReceiveMessageUseCase] Circuit Breaker trip or unhandled LLM error, activating U-First graceful degradation", {
+        error: llmErr.message,
+        phone
+      });
+      const clientName = currentConv.nombre && currentConv.nombre !== "Cliente" ? currentConv.nombre : "";
+      const greeting = clientName ? `\xA1Hola ${clientName}! \u{1F60A}` : "\xA1Hola! \u{1F60A}";
+      const fallbackReply = `${greeting} Recib\xED tu mensaje. Estamos experimentando una peque\xF1a intermitencia t\xE9cnica en este momento. Tu informaci\xF3n ya qued\xF3 registrada y en unos minutos uno de nuestros asesores continuar\xE1 atendi\xE9ndote por aqu\xED.`;
+      currentConv.messages.push({
+        sender: "bot",
+        text: fallbackReply,
+        timestamp: (/* @__PURE__ */ new Date()).toISOString()
+      });
+      currentConv.lastMessageAt = (/* @__PURE__ */ new Date()).toISOString();
+      await this.convRepo.save(currentConv);
+      await this.sendWhatsApp(phone, fallbackReply);
+      return { reply: fallbackReply, leadGenerated: false };
+    }
     if (result.replyText) {
       await this.sendWhatsApp(phone, result.replyText);
     }
@@ -2647,11 +2825,15 @@ Mientras me pasas el dato, te comparto informaci\xF3n detallada de nuestro servi
 ${finalReply}`;
       }
     }
-    conv.messages.push({
-      sender: "user",
-      text: messageText,
-      timestamp: input.inboundTimestamp || (/* @__PURE__ */ new Date()).toISOString()
-    });
+    const lastMsg = conv.messages[conv.messages.length - 1];
+    const isUserMsgAlreadyPushed = lastMsg && lastMsg.sender === "user" && lastMsg.text === messageText && lastMsg.timestamp === (input.inboundTimestamp || lastMsg.timestamp);
+    if (!isUserMsgAlreadyPushed) {
+      conv.messages.push({
+        sender: "user",
+        text: messageText,
+        timestamp: input.inboundTimestamp || (/* @__PURE__ */ new Date()).toISOString()
+      });
+    }
     conv.messages.push({ sender: "bot", text: finalReply, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
     if (mediaSent.some((m) => m.includes("INSTALACION_PROFESIONAL"))) {
       conv.messages.push({

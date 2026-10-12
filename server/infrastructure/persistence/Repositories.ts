@@ -19,16 +19,24 @@ const defaultState = (): ConversationState => ({
 export class InMemoryConversationRepository implements IConversationRepository {
   async findByPhone(tenantId: string, phone: string): Promise<Conversation> {
     const key = `${tenantId}::${phone}`;
-    if (!chatsStore[key]) {
-      chatsStore[key] = {
-        id: phone, tenantId, phone, nombre: 'Cliente',
-        botDisabled: false, messages: [], state: defaultState(),
-        lastMessageAt: new Date().toISOString(),
-        createdAt: new Date().toISOString(),
-        status: 'active',
-      };
+    const existing = chatsStore[key];
+    if (existing) {
+      if (existing.status === 'deleted') {
+        existing.status = 'active';
+        delete (existing as any).deletedAt;
+        delete (existing as any).deletedBy;
+        (existing as any).restoredAt = new Date().toISOString();
+      }
+      return JSON.parse(JSON.stringify(existing));
     }
-    return JSON.parse(JSON.stringify(chatsStore[key]));
+    // Cero escritura ansiosa: Retorna modelo en memoria SIN guardar en chatsStore hasta que se llame a save()
+    return {
+      id: phone, tenantId, phone, nombre: 'Cliente',
+      botDisabled: false, messages: [], state: defaultState(),
+      lastMessageAt: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+      status: 'active',
+    };
   }
 
   async save(conversation: Conversation): Promise<void> {
@@ -150,20 +158,94 @@ export class FirestoreConversationRepository implements IConversationRepository 
 
   async findByPhone(tenantId: string, phone: string): Promise<Conversation> {
     try {
-      const docRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
-      const doc = await docRef.get();
-      if (!doc.exists) {
-        const conv: Conversation = {
-          id: phone, tenantId, phone, nombre: 'Cliente',
-          botDisabled: false, messages: [], state: defaultState(),
+      if (this.db && typeof this.db.runTransaction === 'function') {
+        return await this.db.runTransaction(async (transaction: any) => {
+          const chatRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
+          const trashRef = this.db.collection(`tenants/${tenantId}/deleted_chats`).doc(phone);
+
+          const [chatDoc, trashDoc] = await Promise.all([
+            transaction.get(chatRef),
+            transaction.get(trashRef),
+          ]);
+
+          if (chatDoc.exists) {
+            return { id: chatDoc.id, status: 'active', ...chatDoc.data() } as Conversation;
+          }
+
+          if (trashDoc.exists) {
+            // Refinamiento A: Restauración atómica con runTransaction
+            const trashedData = trashDoc.data() || {};
+            const restoredConv: Conversation = {
+              ...trashedData,
+              id: phone,
+              phone,
+              tenantId,
+              status: 'active',
+              restoredAt: new Date().toISOString(),
+            };
+            delete (restoredConv as any).deletedAt;
+            delete (restoredConv as any).deletedBy;
+
+            transaction.set(chatRef, restoredConv);
+            transaction.delete(trashRef);
+            logger.info(`[FirestoreConversationRepo] Restored chat ${phone} atomically from deleted_chats in runTransaction`);
+            return restoredConv;
+          }
+
+          // Cero escritura ansiosa: Retornar modelo en memoria sin persistir en Firestore
+          return {
+            id: phone,
+            tenantId,
+            phone,
+            nombre: 'Cliente',
+            botDisabled: false,
+            messages: [],
+            state: defaultState(),
+            lastMessageAt: new Date().toISOString(),
+            createdAt: new Date().toISOString(),
+            status: 'active',
+          };
+        });
+      } else {
+        const chatRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
+        const doc = await chatRef.get();
+        if (doc.exists) {
+          return { id: doc.id, status: 'active', ...doc.data() } as Conversation;
+        }
+
+        const trashRef = this.db.collection(`tenants/${tenantId}/deleted_chats`).doc(phone);
+        const trashDoc = await trashRef.get();
+        if (trashDoc.exists) {
+          const trashedData = trashDoc.data() || {};
+          const restoredConv: Conversation = {
+            ...trashedData,
+            id: phone,
+            phone,
+            tenantId,
+            status: 'active',
+            restoredAt: new Date().toISOString(),
+          };
+          delete (restoredConv as any).deletedAt;
+          delete (restoredConv as any).deletedBy;
+          await chatRef.set(restoredConv);
+          await trashRef.delete();
+          logger.info(`[FirestoreConversationRepo] Restored chat ${phone} from deleted_chats to chats (no tx)`);
+          return restoredConv;
+        }
+
+        return {
+          id: phone,
+          tenantId,
+          phone,
+          nombre: 'Cliente',
+          botDisabled: false,
+          messages: [],
+          state: defaultState(),
           lastMessageAt: new Date().toISOString(),
           createdAt: new Date().toISOString(),
           status: 'active',
         };
-        await docRef.set(conv);
-        return conv;
       }
-      return { id: doc.id, status: 'active', ...doc.data() } as Conversation;
     } catch (err: any) {
       logger.warn('[FirestoreConversationRepo] Fallback to In-Memory due to Firestore error', { error: err.message });
       return inMemoryConvFallback.findByPhone(tenantId, phone);

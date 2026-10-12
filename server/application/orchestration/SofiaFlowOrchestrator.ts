@@ -454,12 +454,21 @@ export class SofiaFlowOrchestrator {
       }
     }
 
-    // Append messages to conversation history
-    conv.messages.push({
-      sender: 'user',
-      text: messageText,
-      timestamp: input.inboundTimestamp || new Date().toISOString(),
-    });
+    // Append messages to conversation history (evitando duplicar el mensaje del usuario si ya fue guardado preventivamente)
+    const lastMsg = conv.messages[conv.messages.length - 1];
+    const isUserMsgAlreadyPushed =
+      lastMsg &&
+      lastMsg.sender === 'user' &&
+      lastMsg.text === messageText &&
+      lastMsg.timestamp === (input.inboundTimestamp || lastMsg.timestamp);
+
+    if (!isUserMsgAlreadyPushed) {
+      conv.messages.push({
+        sender: 'user',
+        text: messageText,
+        timestamp: input.inboundTimestamp || new Date().toISOString(),
+      });
+    }
     conv.messages.push({ sender: 'bot', text: finalReply, timestamp: new Date().toISOString() });
     if (mediaSent.some(m => m.includes('INSTALACION_PROFESIONAL'))) {
       conv.messages.push({

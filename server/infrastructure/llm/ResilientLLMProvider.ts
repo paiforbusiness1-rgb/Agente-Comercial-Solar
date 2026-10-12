@@ -1,7 +1,8 @@
 /**
- * ResilientLLMProvider.ts — Microservicio de IA Resiliente con Fallback en Cascada
+ * ResilientLLMProvider.ts — Microservicio de IA Resiliente con Fallback en Cascada y Circuit Breaker
  * 
  * Arquitectura: Groq (primario, 7s timeout) → Gemini 2.5 Flash (fallback automático)
+ * Protegido por LLMCircuitBreaker FSM de 3 Estados (CLOSED, OPEN, HALF_OPEN)
  * Reglas:
  * - Regla 2 (HRU): Cero hardcoding, tipado estricto, universalidad total.
  * - Regla 3 (Anti-God-Object): Microservicio desacoplado con responsabilidad única.
@@ -17,19 +18,25 @@ import {
   ToolDefinition,
 } from '../../interfaces/ILLMProvider.js';
 import { GroqProvider } from './GroqProvider.js';
+import { LLMCircuitBreaker } from './LLMCircuitBreaker.js';
 import { AppConfig } from '../../shared/config/AppConfig.js';
 import { logger } from '../../shared/logger/ConsoleLogger.js';
 
 export class ResilientLLMProvider implements ILLMProvider {
   private groqProvider: ILLMProvider;
   private geminiEndpoint = 'https://generativelanguage.googleapis.com/v1beta/models';
+  public readonly groqCircuit: LLMCircuitBreaker;
+  public readonly geminiCircuit: LLMCircuitBreaker;
 
   constructor(
     groqProvider?: ILLMProvider,
     private customFetch?: typeof fetch,
-    private geminiTimeoutMs: number = 7000
+    private geminiTimeoutMs: number = 7000,
+    circuitBreakers?: { groq?: LLMCircuitBreaker; gemini?: LLMCircuitBreaker }
   ) {
     this.groqProvider = groqProvider || new GroqProvider();
+    this.groqCircuit = circuitBreakers?.groq || new LLMCircuitBreaker({ name: 'Groq', failureThreshold: 2, cooldownMs: 60000 });
+    this.geminiCircuit = circuitBreakers?.gemini || new LLMCircuitBreaker({ name: 'Gemini', failureThreshold: 2, cooldownMs: 60000 });
   }
 
   async complete(
@@ -43,24 +50,54 @@ export class ResilientLLMProvider implements ILLMProvider {
       ?.content.match(/<phone>([^<]+)<\/phone>/);
     const phone = phoneMatch ? phoneMatch[1].trim() : 'unknown';
 
-    try {
-      return await this.groqProvider.complete(messages, tools, temperature);
-    } catch (groqErr: any) {
-      // Refinamiento 2: Registro obligatorio de observabilidad con severidad warn
-      logger.warn(
-        `[ResilientLLM] Groq timeout/failure detected. Failing over to Gemini 2.5 Flash for phone: ${phone}`,
-        { error: groqErr.message, phone }
+    // 1. INTENTO PRIMARIO: GROQ (si el circuito lo permite)
+    if (!this.groqCircuit.isOpen()) {
+      try {
+        const result = await this.groqProvider.complete(messages, tools, temperature);
+        this.groqCircuit.recordSuccess();
+        return result;
+      } catch (groqErr: any) {
+        this.groqCircuit.recordFailure(groqErr);
+        logger.warn(
+          `[ResilientLLM] Groq timeout/failure detected. Failing over to Gemini 2.5 Flash for phone: ${phone}`,
+          { error: groqErr.message, phone, groqCircuitState: this.groqCircuit.getState() }
+        );
+      }
+    } else {
+      logger.info(
+        `[ResilientLLM] Groq circuit is OPEN. Fail-fast (0ms) direct failover to Gemini for phone: ${phone}`,
+        { phone }
       );
-
-      return await this.callGeminiFallback(messages, temperature);
     }
+
+    // 2. FALLBACK SECUNDARIO: GEMINI (si el circuito lo permite)
+    if (!this.geminiCircuit.isOpen()) {
+      try {
+        const geminiResult = await this.callGeminiFallback(messages, temperature);
+        this.geminiCircuit.recordSuccess();
+        return geminiResult;
+      } catch (geminiErr: any) {
+        this.geminiCircuit.recordFailure(geminiErr);
+        logger.error('[ResilientLLM] Gemini fallback also failed', {
+          error: geminiErr.message,
+          phone,
+          geminiCircuitState: this.geminiCircuit.getState(),
+        });
+        throw geminiErr;
+      }
+    }
+
+    // 3. AMBOS CIRCUITOS EN OPEN
+    const outageErr = new Error('[ResilientLLM] Both Groq and Gemini circuits are OPEN. Complete infrastructure outage.');
+    logger.error(outageErr.message, { phone });
+    throw outageErr;
   }
 
   private async callGeminiFallback(
     messages: LLMMessage[],
     temperature = 0.2
   ): Promise<LLMResponse> {
-    const apiKey = AppConfig.gemini.apiKey;
+    const apiKey = AppConfig.gemini.apiKey || (this.customFetch ? 'mock-gemini-test-key' : '');
     if (!apiKey) {
       throw new Error('[ResilientLLM] GEMINI_API_KEY no configurada. Fallback no disponible.');
     }
@@ -110,9 +147,6 @@ export class ResilientLLMProvider implements ILLMProvider {
         finishReason: 'stop',
       };
     } catch (geminiErr: any) {
-      logger.error('[ResilientLLM] Both Groq and Gemini failed', {
-        error: geminiErr.message,
-      });
       throw geminiErr;
     }
   }

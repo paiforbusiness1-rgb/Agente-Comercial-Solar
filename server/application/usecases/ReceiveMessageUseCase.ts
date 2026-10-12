@@ -293,15 +293,51 @@ export class ReceiveMessageUseCase {
         ? `Adjunto mi recibo de luz de ${extractedBill.amount} pesos`
         : '';
 
-    // 3. Procesar mensaje a través del orquestador de 6 pasos
-    const result = await this.orchestrator.processMessage({
-      tenantId,
-      phone,
-      userName: input.name,
-      messageText: effectiveMessageText,
-      inboundTimestamp,
-      extractedBill,
-    });
+    // REFINAMIENTO B (APO-018): Guardar Mensaje del Usuario Primero (Disco Seguro antes de IA)
+    const lastMsg = currentConv.messages[currentConv.messages.length - 1];
+    const alreadySaved = lastMsg && lastMsg.sender === 'user' && lastMsg.timestamp === inboundTimestamp;
+    if (!alreadySaved && effectiveMessageText) {
+      currentConv.messages.push({
+        sender: 'user',
+        text: effectiveMessageText,
+        timestamp: inboundTimestamp,
+      });
+      currentConv.lastMessageAt = inboundTimestamp;
+      await this.convRepo.save(currentConv); // 👈 DISCO SEGURO: Persistido en Firestore antes de llamar a IA
+    }
+
+    // 3. Procesar mensaje a través del orquestador de 6 pasos (con Circuit Breaker y degradación elegante)
+    let result: { replyText: string; nextStep: number; botDisabled: boolean; mediaSent?: string[] };
+    try {
+      result = await this.orchestrator.processMessage({
+        tenantId,
+        phone,
+        userName: input.name,
+        messageText: effectiveMessageText,
+        inboundTimestamp,
+        extractedBill,
+      });
+    } catch (llmErr: any) {
+      logger.error('[ReceiveMessageUseCase] Circuit Breaker trip or unhandled LLM error, activating U-First graceful degradation', {
+        error: llmErr.message,
+        phone,
+      });
+
+      const clientName = currentConv.nombre && currentConv.nombre !== 'Cliente' ? currentConv.nombre : '';
+      const greeting = clientName ? `¡Hola ${clientName}! 😊` : '¡Hola! 😊';
+      const fallbackReply = `${greeting} Recibí tu mensaje. Estamos experimentando una pequeña intermitencia técnica en este momento. Tu información ya quedó registrada y en unos minutos uno de nuestros asesores continuará atendiéndote por aquí.`;
+
+      currentConv.messages.push({
+        sender: 'bot',
+        text: fallbackReply,
+        timestamp: new Date().toISOString(),
+      });
+      currentConv.lastMessageAt = new Date().toISOString();
+      await this.convRepo.save(currentConv);
+      await this.sendWhatsApp(phone, fallbackReply);
+
+      return { reply: fallbackReply, leadGenerated: false };
+    }
 
     // 4. Enviar respuesta textual vía WhatsApp
     if (result.replyText) {
