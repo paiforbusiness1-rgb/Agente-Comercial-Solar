@@ -335,7 +335,8 @@ export class SofiaFlowOrchestrator {
         .replace(/(?:[-*•]\s*)?\*?(?:Sistema|Costo estimado|Inversión estimada|Inversion estimada|Ahorro mensual|Ahorro anual|Retorno de inversión|Retorno de inversion)\*?:?.*(?:\r?\n|$)/gi, '')
         .trim();
 
-      finalReply = cleanUserMsg ? `${pdfResult.textSummary}\n\n${cleanUserMsg}` : pdfResult.textSummary;
+      // Estructura Sándwich U-First (APO-015): Saludo e Intro arriba, Tarjeta en medio, CTA abajo
+      finalReply = this.formatQuoteSandwichReply(cleanUserMsg, pdfResult.textSummary, conv.nombre || 'Cliente');
       conv.state.completedSteps.push('QUOTE_SENT');
     }
 
@@ -519,5 +520,54 @@ export class SofiaFlowOrchestrator {
         logger.error(`[SofiaFlowOrchestrator] Fallback email notification also failed:`, emailErr);
       }
     }
+  }
+
+  /**
+   * Estructura Sándwich U-First (APO-015):
+   * Primacía: Saludo e Introducción conversacional arriba de la tarjeta
+   * Cuerpo: Tarjeta oficial del presupuesto
+   * Recencia: Llamada a la acción / Pregunta sobre dudas o financiamiento abajo
+   */
+  public formatQuoteSandwichReply(
+    cleanUserMsg: string,
+    textSummary: string,
+    clientName: string
+  ): string {
+    const defaultIntro = `¡Con mucho gusto, ${clientName}! Te comparto la propuesta preliminar de inversión y el ahorro estimado para tu sistema solar:`;
+    const defaultCta = `Por favor revisa el desglose anterior. ¿Tienes alguna duda o te gustaría que revisemos nuestras opciones de financiamiento disponibles? 😊`;
+
+    if (!cleanUserMsg || !cleanUserMsg.trim()) {
+      return `${defaultIntro}\n\n${textSummary}\n\n${defaultCta}`;
+    }
+
+    const trimmed = cleanUserMsg.trim();
+
+    // 1. Separación por párrafos (si el LLM generó párrafos separados o el filtro de viñetas los dividió)
+    const paragraphs = trimmed.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
+    if (paragraphs.length >= 2) {
+      const intro = paragraphs[0];
+      const cta = paragraphs.slice(1).join('\n\n');
+      return `${intro}\n\n${textSummary}\n\n${cta}`;
+    }
+
+    // 2. Separación por pregunta explícita ('¿')
+    const questionIndex = trimmed.indexOf('¿');
+    if (questionIndex > 10) {
+      const intro = trimmed.substring(0, questionIndex).trim();
+      const cta = trimmed.substring(questionIndex).trim();
+      return `${intro}\n\n${textSummary}\n\n${cta}`;
+    }
+
+    // 3. Separación por oraciones de cierre / llamada a la acción ("Por favor revisa...", "Dime si...")
+    const ctaRegex = /(?:(?:Por favor|Revisa|Cualquier duda|Dime si|Avísame)\b.*)/i;
+    const ctaMatch = trimmed.match(ctaRegex);
+    if (ctaMatch && ctaMatch.index && ctaMatch.index > 10) {
+      const intro = trimmed.substring(0, ctaMatch.index).trim();
+      const cta = trimmed.substring(ctaMatch.index).trim();
+      return `${intro}\n\n${textSummary}\n\n${cta}`;
+    }
+
+    // 4. Si es una sola frase introductoria, ubicarla arriba y colocar el CTA por defecto abajo
+    return `${trimmed}\n\n${textSummary}\n\n${defaultCta}`;
   }
 }

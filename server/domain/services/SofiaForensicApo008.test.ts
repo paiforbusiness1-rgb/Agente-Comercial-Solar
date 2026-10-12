@@ -162,6 +162,14 @@ describe('SQA Forense Plan APO-008 — Tests T22 a T26 (Anti-Redundancia, Anti-M
     // 4. "Costo estimado" fue totalmente erradicado del texto y la tarjeta oficial presenta "Inversión Total"
     expect(result.replyText).not.toContain('Costo estimado');
     expect(result.replyText).toContain('Inversión Total: *$26,000 MXN');
+
+    // 5. Estructura Sándwich U-First (APO-015): La frase introductoria precede a la tarjeta oficial y la pregunta de financiamiento cierra el mensaje
+    const introIndex = result.replyText.indexOf('¡Con mucho gusto Carlos!');
+    const cardIndex = result.replyText.indexOf('PRESUPUESTO PRELIMINAR DE SISTEMA SOLAR');
+    const ctaIndex = result.replyText.indexOf('¿Te gustaría conocer nuestras opciones de financiamiento');
+    expect(introIndex).toBeGreaterThanOrEqual(0);
+    expect(cardIndex).toBeGreaterThan(introIndex);
+    expect(ctaIndex).toBeGreaterThan(cardIndex);
   });
 
   // ─── T24: Regla Anti-Loro en Paso 3 (equivalenceStated) ───────────────────

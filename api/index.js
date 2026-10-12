@@ -2358,9 +2358,7 @@ var SofiaFlowOrchestrator = class {
       };
       const pdfResult = await QuotePdfService.generateQuote(quoteDto);
       let cleanUserMsg = parsed.message_to_user.replace(/(?:[-*•]\s*)?\*?(?:Sistema|Costo estimado|Inversión estimada|Inversion estimada|Ahorro mensual|Ahorro anual|Retorno de inversión|Retorno de inversion)\*?:?.*(?:\r?\n|$)/gi, "").trim();
-      finalReply = cleanUserMsg ? `${pdfResult.textSummary}
-
-${cleanUserMsg}` : pdfResult.textSummary;
+      finalReply = this.formatQuoteSandwichReply(cleanUserMsg, pdfResult.textSummary, conv.nombre || "Cliente");
       conv.state.completedSteps.push("QUOTE_SENT");
     }
     const shouldSendInstalacion = (parsed.media_to_send === "INSTALACION_PROFESIONAL" || effectiveNextStep === 2 || effectiveNextStep === 3) && !conv.state.mediaSentFlags.instalacionProfessional;
@@ -2519,6 +2517,60 @@ Mientras me pasas el dato, te comparto informaci\xF3n detallada de nuestro servi
         logger.error(`[SofiaFlowOrchestrator] Fallback email notification also failed:`, emailErr);
       }
     }
+  }
+  /**
+   * Estructura Sándwich U-First (APO-015):
+   * Primacía: Saludo e Introducción conversacional arriba de la tarjeta
+   * Cuerpo: Tarjeta oficial del presupuesto
+   * Recencia: Llamada a la acción / Pregunta sobre dudas o financiamiento abajo
+   */
+  formatQuoteSandwichReply(cleanUserMsg, textSummary, clientName) {
+    const defaultIntro = `\xA1Con mucho gusto, ${clientName}! Te comparto la propuesta preliminar de inversi\xF3n y el ahorro estimado para tu sistema solar:`;
+    const defaultCta = `Por favor revisa el desglose anterior. \xBFTienes alguna duda o te gustar\xEDa que revisemos nuestras opciones de financiamiento disponibles? \u{1F60A}`;
+    if (!cleanUserMsg || !cleanUserMsg.trim()) {
+      return `${defaultIntro}
+
+${textSummary}
+
+${defaultCta}`;
+    }
+    const trimmed = cleanUserMsg.trim();
+    const paragraphs = trimmed.split(/\n\s*\n/).map((p) => p.trim()).filter(Boolean);
+    if (paragraphs.length >= 2) {
+      const intro = paragraphs[0];
+      const cta = paragraphs.slice(1).join("\n\n");
+      return `${intro}
+
+${textSummary}
+
+${cta}`;
+    }
+    const questionIndex = trimmed.indexOf("\xBF");
+    if (questionIndex > 10) {
+      const intro = trimmed.substring(0, questionIndex).trim();
+      const cta = trimmed.substring(questionIndex).trim();
+      return `${intro}
+
+${textSummary}
+
+${cta}`;
+    }
+    const ctaRegex = /(?:(?:Por favor|Revisa|Cualquier duda|Dime si|Avísame)\b.*)/i;
+    const ctaMatch = trimmed.match(ctaRegex);
+    if (ctaMatch && ctaMatch.index && ctaMatch.index > 10) {
+      const intro = trimmed.substring(0, ctaMatch.index).trim();
+      const cta = trimmed.substring(ctaMatch.index).trim();
+      return `${intro}
+
+${textSummary}
+
+${cta}`;
+    }
+    return `${trimmed}
+
+${textSummary}
+
+${defaultCta}`;
   }
 };
 
