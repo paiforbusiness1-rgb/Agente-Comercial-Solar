@@ -188,7 +188,11 @@ export class SofiaFlowOrchestrator {
       financingConsentGiven: conv.state.financingConsentGiven,
       botDisabled: conv.botDisabled,
       latestUserMessage: messageText,
-      historySummary: conv.messages.slice(-6).map(m => `${m.sender}: ${m.text}`).join('\n'),
+      historySummary: conv.messages
+        .filter((m) => !m.text.startsWith('📄 [Brochure Enviado]'))
+        .slice(-4)
+        .map((m) => `${m.sender}: ${m.text}`)
+        .join('\n'),
       isReturningContext,
       previousSessionSummary,
       mediaSentFlags: conv.state.mediaSentFlags,

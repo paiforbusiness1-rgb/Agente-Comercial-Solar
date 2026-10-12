@@ -31,7 +31,7 @@ export class ResilientLLMProvider implements ILLMProvider {
   constructor(
     groqProvider?: ILLMProvider,
     private customFetch?: typeof fetch,
-    private geminiTimeoutMs: number = 7000,
+    private geminiTimeoutMs: number = 3500,
     circuitBreakers?: { groq?: LLMCircuitBreaker; gemini?: LLMCircuitBreaker }
   ) {
     this.groqProvider = groqProvider || new GroqProvider();
@@ -126,6 +126,9 @@ export class ResilientLLMProvider implements ILLMProvider {
           generationConfig: {
             temperature,
             responseMimeType: 'application/json',
+            thinkingConfig: {
+              thinkingBudget: 0,
+            },
           },
         }),
         signal: AbortSignal.timeout(this.geminiTimeoutMs),

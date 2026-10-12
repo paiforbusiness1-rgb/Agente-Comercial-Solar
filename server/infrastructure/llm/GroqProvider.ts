@@ -4,8 +4,8 @@ import {
 import { AppConfig } from '../../shared/config/AppConfig.js';
 import { logger } from '../../shared/logger/ConsoleLogger.js';
 
-const MAX_RETRIES = 2;
-const RETRY_DELAY_MS = 400;
+const MAX_RETRIES = 1;
+const RETRY_DELAY_MS = 300;
 
 async function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
@@ -15,7 +15,7 @@ export class GroqProvider implements ILLMProvider {
   private readonly endpoint = 'https://api.groq.com/openai/v1/chat/completions';
 
   constructor(
-    private readonly timeoutMs: number = 7000,
+    private readonly timeoutMs: number = 4000,
     private readonly customFetch?: typeof fetch
   ) {}
 

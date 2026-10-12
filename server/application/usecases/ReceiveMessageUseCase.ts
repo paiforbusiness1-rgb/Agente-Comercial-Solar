@@ -325,7 +325,34 @@ export class ReceiveMessageUseCase {
 
       const clientName = currentConv.nombre && currentConv.nombre !== 'Cliente' ? currentConv.nombre : '';
       const greeting = clientName ? `¡Hola ${clientName}! 😊` : '¡Hola! 😊';
-      const fallbackReply = `${greeting} Recibí tu mensaje. Estamos experimentando una pequeña intermitencia técnica en este momento. Tu información ya quedó registrada y en unos minutos uno de nuestros asesores continuará atendiéndote por aquí.`;
+      let fallbackReply = '';
+
+      // GUARDIA ESTRICTA (Observación 3 de Auditoría):
+      // Si el recibo ya fue extraído con éxito, NO enviamos intermitencia técnica.
+      // Confirmamos el recibo de inmediato, persistimos el estado y preguntamos por el techo.
+      if (extractedBill && typeof extractedBill.amount === 'number' && extractedBill.amount > 0) {
+        currentConv.state.monthlyBill =
+          extractedBill.frequency === 'bimestral'
+            ? Math.round(extractedBill.amount / 2)
+            : extractedBill.amount;
+        currentConv.state.bimestralBill =
+          extractedBill.frequency === 'bimestral'
+            ? extractedBill.amount
+            : extractedBill.amount * 2;
+        currentConv.state.billFrequency = extractedBill.frequency || 'mensual';
+        currentConv.state.phase = 'TECHNICAL_SURVEY';
+        (currentConv as any).montoRecibo = `$${extractedBill.amount.toLocaleString('es-MX')} MXN (${extractedBill.frequency || 'mensual'})`;
+        currentConv.state.equivalenceStated = true;
+
+        const namePrefix = clientName ? `¡Excelente, ${clientName}! ` : '¡Excelente! ';
+        const pagesNote = extractedBill.bothPagesAnalyzed
+          ? 'He analizado con éxito ambas páginas de tu recibo CFE 📄. '
+          : '';
+        fallbackReply = `${namePrefix}${pagesNote}Recibí tu recibo de CFE por $${extractedBill.amount.toLocaleString('es-MX')} MXN (${extractedBill.frequency || 'mensual'}). Para diseñar tu solución solar a la medida, ¿podrías indicarme qué tipo de techo tienes en tu propiedad (concreto, lámina o teja)? 🏠`;
+      } else {
+        // Fallback Secundario: Solo si NO hay recibo extraído válido
+        fallbackReply = `${greeting} Recibí tu mensaje. Estamos experimentando una pequeña intermitencia técnica en este momento. Tu información ya quedó registrada y en unos minutos uno de nuestros asesores continuará atendiéndote por aquí.`;
+      }
 
       currentConv.messages.push({
         sender: 'bot',

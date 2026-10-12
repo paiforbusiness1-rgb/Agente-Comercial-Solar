@@ -101,13 +101,13 @@ var ConsoleLogger = class {
 var logger = new ConsoleLogger();
 
 // server/infrastructure/llm/GroqProvider.ts
-var MAX_RETRIES = 2;
-var RETRY_DELAY_MS = 400;
+var MAX_RETRIES = 1;
+var RETRY_DELAY_MS = 300;
 async function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 var GroqProvider = class {
-  constructor(timeoutMs = 7e3, customFetch) {
+  constructor(timeoutMs = 4e3, customFetch) {
     this.timeoutMs = timeoutMs;
     this.customFetch = customFetch;
     this.endpoint = "https://api.groq.com/openai/v1/chat/completions";
@@ -244,7 +244,7 @@ var LLMCircuitBreaker = class {
 
 // server/infrastructure/llm/ResilientLLMProvider.ts
 var ResilientLLMProvider = class {
-  constructor(groqProvider, customFetch, geminiTimeoutMs = 7e3, circuitBreakers) {
+  constructor(groqProvider, customFetch, geminiTimeoutMs = 3500, circuitBreakers) {
     this.customFetch = customFetch;
     this.geminiTimeoutMs = geminiTimeoutMs;
     this.geminiEndpoint = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -317,7 +317,10 @@ var ResilientLLMProvider = class {
           ],
           generationConfig: {
             temperature,
-            responseMimeType: "application/json"
+            responseMimeType: "application/json",
+            thinkingConfig: {
+              thinkingBudget: 0
+            }
           }
         }),
         signal: AbortSignal.timeout(this.geminiTimeoutMs)
@@ -1758,7 +1761,20 @@ var ReceiveMessageUseCase = class {
       });
       const clientName = currentConv.nombre && currentConv.nombre !== "Cliente" ? currentConv.nombre : "";
       const greeting = clientName ? `\xA1Hola ${clientName}! \u{1F60A}` : "\xA1Hola! \u{1F60A}";
-      const fallbackReply = `${greeting} Recib\xED tu mensaje. Estamos experimentando una peque\xF1a intermitencia t\xE9cnica en este momento. Tu informaci\xF3n ya qued\xF3 registrada y en unos minutos uno de nuestros asesores continuar\xE1 atendi\xE9ndote por aqu\xED.`;
+      let fallbackReply = "";
+      if (extractedBill && typeof extractedBill.amount === "number" && extractedBill.amount > 0) {
+        currentConv.state.monthlyBill = extractedBill.frequency === "bimestral" ? Math.round(extractedBill.amount / 2) : extractedBill.amount;
+        currentConv.state.bimestralBill = extractedBill.frequency === "bimestral" ? extractedBill.amount : extractedBill.amount * 2;
+        currentConv.state.billFrequency = extractedBill.frequency || "mensual";
+        currentConv.state.phase = "TECHNICAL_SURVEY";
+        currentConv.montoRecibo = `$${extractedBill.amount.toLocaleString("es-MX")} MXN (${extractedBill.frequency || "mensual"})`;
+        currentConv.state.equivalenceStated = true;
+        const namePrefix = clientName ? `\xA1Excelente, ${clientName}! ` : "\xA1Excelente! ";
+        const pagesNote = extractedBill.bothPagesAnalyzed ? "He analizado con \xE9xito ambas p\xE1ginas de tu recibo CFE \u{1F4C4}. " : "";
+        fallbackReply = `${namePrefix}${pagesNote}Recib\xED tu recibo de CFE por $${extractedBill.amount.toLocaleString("es-MX")} MXN (${extractedBill.frequency || "mensual"}). Para dise\xF1ar tu soluci\xF3n solar a la medida, \xBFpodr\xEDas indicarme qu\xE9 tipo de techo tienes en tu propiedad (concreto, l\xE1mina o teja)? \u{1F3E0}`;
+      } else {
+        fallbackReply = `${greeting} Recib\xED tu mensaje. Estamos experimentando una peque\xF1a intermitencia t\xE9cnica en este momento. Tu informaci\xF3n ya qued\xF3 registrada y en unos minutos uno de nuestros asesores continuar\xE1 atendi\xE9ndote por aqu\xED.`;
+      }
       currentConv.messages.push({
         sender: "bot",
         text: fallbackReply,
@@ -2689,7 +2705,7 @@ var SofiaFlowOrchestrator = class {
       financingConsentGiven: conv.state.financingConsentGiven,
       botDisabled: conv.botDisabled,
       latestUserMessage: messageText,
-      historySummary: conv.messages.slice(-6).map((m) => `${m.sender}: ${m.text}`).join("\n"),
+      historySummary: conv.messages.filter((m) => !m.text.startsWith("\u{1F4C4} [Brochure Enviado]")).slice(-4).map((m) => `${m.sender}: ${m.text}`).join("\n"),
       isReturningContext,
       previousSessionSummary,
       mediaSentFlags: conv.state.mediaSentFlags
