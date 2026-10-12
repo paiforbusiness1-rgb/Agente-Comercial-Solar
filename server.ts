@@ -8,7 +8,7 @@ import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { initializeApp, cert } from 'firebase-admin/app';
-import { getFirestore } from 'firebase-admin/firestore';
+import { getFirestore, initializeFirestore } from 'firebase-admin/firestore';
 import nodemailer from 'nodemailer';
 import fs from 'fs';
 import firebaseConfig from './firebase-applet-config.json';
@@ -35,24 +35,28 @@ try {
   const hasEnvCredentials = !!process.env.GOOGLE_APPLICATION_CREDENTIALS;
 
   if (hasServiceAccount || hasEnvCredentials) {
+    let fbApp: any;
     if (hasServiceAccount) {
-      initializeApp({
+      fbApp = initializeApp({
         credential: cert(serviceAccountPath),
         projectId: firebaseConfig.projectId,
       });
       console.log('Firebase Admin SDK initialized using firebase-service-account.json');
     } else {
-      initializeApp({
+      fbApp = initializeApp({
         projectId: firebaseConfig.projectId,
       });
       console.log('Firebase Admin SDK initialized using GOOGLE_APPLICATION_CREDENTIALS');
     }
     
-    // Connect to the specific database ID or fall back to standard
+    // Connect to the specific database ID or fall back to standard with ignoreUndefinedProperties
     const dbId = firebaseConfig.firestoreDatabaseId;
-    db = dbId && dbId !== '(default)'
-      ? getFirestore(dbId)
-      : getFirestore();
+    const targetDbId = dbId && dbId !== '(default)' ? dbId : undefined;
+    try {
+      db = initializeFirestore(fbApp, { ignoreUndefinedProperties: true } as any, targetDbId);
+    } catch {
+      db = targetDbId ? getFirestore(targetDbId) : getFirestore();
+    }
     
     console.log(`Firebase Admin SDK connected successfully. Database ID: ${dbId || '(default)'}`);
   } else {

@@ -10,7 +10,7 @@
 
 import express from 'express';
 import { initializeApp, getApps, cert } from 'firebase-admin/app';
-import { getFirestore } from 'firebase-admin/firestore';
+import { getFirestore, initializeFirestore } from 'firebase-admin/firestore';
 import nodemailer from 'nodemailer';
 // ─── v2 Architecture (Clean Architecture / Tool Calling) ───────────────────
 import { v2Router } from '../server/infrastructure/web/v2Router.js';
@@ -39,11 +39,21 @@ let isInMemory = false;
 const inMemoryChats: Record<string, any> = {};
 const inMemoryLeads: Record<string, any> = {};
 
+function getOrInitFirestore(dbId?: string) {
+  const app = getApps()[0];
+  const targetDbId = dbId && dbId !== '(default)' ? dbId : undefined;
+  try {
+    return initializeFirestore(app, { ignoreUndefinedProperties: true } as any, targetDbId);
+  } catch {
+    return targetDbId ? getFirestore(targetDbId) : getFirestore();
+  }
+}
+
 function initFirebase() {
   // Avoid re-initializing on hot reloads (Vercel reuses instances between requests)
   if (getApps().length > 0) {
     const dbId = firebaseConfig.firestoreDatabaseId;
-    db = dbId && dbId !== '(default)' ? getFirestore(dbId) : getFirestore();
+    db = getOrInitFirestore(dbId);
     initRepositories(db);
     return;
   }
@@ -67,7 +77,7 @@ function initFirebase() {
       return;
     }
     const dbId = firebaseConfig.firestoreDatabaseId;
-    db = dbId && dbId !== '(default)' ? getFirestore(dbId) : getFirestore();
+    db = getOrInitFirestore(dbId);
     console.log(`Firebase Admin SDK connected. Database ID: ${dbId || '(default)'}`);
   } catch (error) {
     console.warn('Firebase Admin SDK failed to initialize. Falling back to in-memory mode:', error);

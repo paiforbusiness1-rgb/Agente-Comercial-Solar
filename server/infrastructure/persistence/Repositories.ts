@@ -3,6 +3,7 @@ import { ILeadRepository } from '../../domain/repositories/ILeadRepository.js';
 import { Conversation, ConversationState, Message } from '../../domain/entities/Conversation.js';
 import { Lead } from '../../domain/entities/Lead.js';
 import { logger } from '../../shared/logger/ConsoleLogger.js';
+import { cleanFirestorePayload } from './FirestoreSanitizer.js';
 
 // ─── In-Memory Fallback (replaces old inMemoryChats/inMemoryLeads) ────────
 
@@ -42,42 +43,43 @@ export class InMemoryConversationRepository implements IConversationRepository {
   async save(conversation: Conversation): Promise<void> {
     const key = `${conversation.tenantId}::${conversation.phone}`;
     if (!conversation.status) conversation.status = 'active';
+    const cleanConv = cleanFirestorePayload(conversation);
     const existing = chatsStore[key];
     if (existing) {
       // Reconciliación defensiva de mensajes (Refinamiento 3 - Regla 6 SSD)
       const msgMap = new Map<string, Message>();
       (existing.messages || []).forEach((m) => msgMap.set(`${m.timestamp}_${m.text}`, m));
-      (conversation.messages || []).forEach((m) => msgMap.set(`${m.timestamp}_${m.text}`, m));
+      (cleanConv.messages || []).forEach((m) => msgMap.set(`${m.timestamp}_${m.text}`, m));
       const mergedMessages = Array.from(msgMap.values()).sort((a, b) =>
         (a.timestamp || '').localeCompare(b.timestamp || '')
       );
 
       const mergedCompletedSteps = Array.from(
-        new Set([...(existing.state?.completedSteps || []), ...(conversation.state?.completedSteps || [])])
+        new Set([...(existing.state?.completedSteps || []), ...(cleanConv.state?.completedSteps || [])])
       );
 
       const mergedState: ConversationState = {
         ...existing.state,
-        ...conversation.state,
+        ...cleanConv.state,
         completedSteps: mergedCompletedSteps,
-        monthlyBill: conversation.state?.monthlyBill || existing.state?.monthlyBill,
-        bimestralBill: conversation.state?.bimestralBill || existing.state?.bimestralBill,
+        monthlyBill: cleanConv.state?.monthlyBill || existing.state?.monthlyBill,
+        bimestralBill: cleanConv.state?.bimestralBill || existing.state?.bimestralBill,
         reversePageReceived:
-          conversation.state?.reversePageReceived !== undefined
-            ? conversation.state.reversePageReceived
+          cleanConv.state?.reversePageReceived !== undefined
+            ? cleanConv.state.reversePageReceived
             : existing.state?.reversePageReceived,
         lastBillExtractedAt:
-          conversation.state?.lastBillExtractedAt || existing.state?.lastBillExtractedAt,
+          cleanConv.state?.lastBillExtractedAt || existing.state?.lastBillExtractedAt,
       };
 
       chatsStore[key] = {
         ...existing,
-        ...conversation,
+        ...cleanConv,
         messages: mergedMessages,
         state: mergedState,
       };
     } else {
-      chatsStore[key] = conversation;
+      chatsStore[key] = cleanConv;
     }
   }
 
@@ -186,10 +188,11 @@ export class FirestoreConversationRepository implements IConversationRepository 
             delete (restoredConv as any).deletedAt;
             delete (restoredConv as any).deletedBy;
 
-            transaction.set(chatRef, restoredConv);
+            const cleanRestored = cleanFirestorePayload(restoredConv);
+            transaction.set(chatRef, cleanRestored);
             transaction.delete(trashRef);
             logger.info(`[FirestoreConversationRepo] Restored chat ${phone} atomically from deleted_chats in runTransaction`);
-            return restoredConv;
+            return cleanRestored;
           }
 
           // Cero escritura ansiosa: Retornar modelo en memoria sin persistir en Firestore
@@ -227,10 +230,11 @@ export class FirestoreConversationRepository implements IConversationRepository 
           };
           delete (restoredConv as any).deletedAt;
           delete (restoredConv as any).deletedBy;
-          await chatRef.set(restoredConv);
+          const cleanRestored = cleanFirestorePayload(restoredConv);
+          await chatRef.set(cleanRestored);
           await trashRef.delete();
           logger.info(`[FirestoreConversationRepo] Restored chat ${phone} from deleted_chats to chats (no tx)`);
-          return restoredConv;
+          return cleanRestored;
         }
 
         return {
@@ -255,15 +259,27 @@ export class FirestoreConversationRepository implements IConversationRepository 
   async save(conversation: Conversation): Promise<void> {
     if (!conversation.status) conversation.status = 'active';
     await inMemoryConvFallback.save(conversation);
-    try {
-      if (this.db && typeof this.db.runTransaction === 'function') {
-        const docRef = this.db.collection(`tenants/${conversation.tenantId}/chats`).doc(conversation.phone);
+
+    const cleanConv = cleanFirestorePayload(conversation);
+    if (!this.db) return;
+
+    const docRef = typeof this.db.collection === 'function'
+      ? this.db.collection(`tenants/${cleanConv.tenantId}/chats`).doc(cleanConv.phone)
+      : null;
+
+    if (!docRef) return;
+
+    let txSuccess = false;
+
+    // 1. INTENTO TRANSACCIONAL PRINCIPAL (Sin try/catch interno - Refinamiento A)
+    if (typeof this.db.runTransaction === 'function') {
+      try {
         await this.db.runTransaction(async (transaction: any) => {
           const doc = await transaction.get(docRef);
           if (doc.exists) {
             const existingData = doc.data() || {};
             const existingMessages: Message[] = existingData.messages || [];
-            const newMessages = conversation.messages || [];
+            const newMessages = cleanConv.messages || [];
 
             const msgMap = new Map<string, Message>();
             existingMessages.forEach((m) => msgMap.set(`${m.timestamp}_${m.text}`, m));
@@ -273,44 +289,74 @@ export class FirestoreConversationRepository implements IConversationRepository 
             );
 
             const mergedCompletedSteps = Array.from(
-              new Set([...(existingData.state?.completedSteps || []), ...(conversation.state?.completedSteps || [])])
+              new Set([...(existingData.state?.completedSteps || []), ...(cleanConv.state?.completedSteps || [])])
             );
 
             const mergedState = {
               ...existingData.state,
-              ...conversation.state,
+              ...cleanConv.state,
               completedSteps: mergedCompletedSteps,
-              monthlyBill: conversation.state?.monthlyBill || existingData.state?.monthlyBill,
-              bimestralBill: conversation.state?.bimestralBill || existingData.state?.bimestralBill,
+              monthlyBill: cleanConv.state?.monthlyBill ?? existingData.state?.monthlyBill,
+              bimestralBill: cleanConv.state?.bimestralBill ?? existingData.state?.bimestralBill,
               reversePageReceived:
-                conversation.state?.reversePageReceived !== undefined
-                  ? conversation.state.reversePageReceived
+                cleanConv.state?.reversePageReceived !== undefined
+                  ? cleanConv.state.reversePageReceived
                   : existingData.state?.reversePageReceived,
               lastBillExtractedAt:
-                conversation.state?.lastBillExtractedAt || existingData.state?.lastBillExtractedAt,
+                cleanConv.state?.lastBillExtractedAt || existingData.state?.lastBillExtractedAt,
             };
 
-            transaction.set(
-              docRef,
-              {
-                ...conversation,
-                messages: mergedMessages,
-                state: mergedState,
-              },
-              { merge: true }
-            );
+            const finalTxPayload = cleanFirestorePayload({
+              ...cleanConv,
+              messages: mergedMessages,
+              state: mergedState,
+            });
+
+            transaction.set(docRef, finalTxPayload, { merge: true });
           } else {
-            transaction.set(docRef, conversation, { merge: true });
+            transaction.set(docRef, cleanConv, { merge: true });
           }
         });
-      } else {
-        await this.db
-          .collection(`tenants/${conversation.tenantId}/chats`)
-          .doc(conversation.phone)
-          .set(conversation, { merge: true });
+        txSuccess = true;
+      } catch (txErr: any) {
+        logger.error('[FirestoreConversationRepo] runTransaction failed, evaluating arrayUnion fallback', {
+          error: txErr.message,
+          stack: txErr.stack,
+          phone: conversation.phone,
+        });
       }
-    } catch (err: any) {
-      logger.warn('[FirestoreConversationRepo] Firestore save failed (using in-memory fallback)', { error: err.message });
+    }
+
+    // 2. FALLBACK DE EMERGENCIA EXTERNO CON FieldValue.arrayUnion (Refinamiento A & Defecto 1)
+    if (!txSuccess) {
+      try {
+        logger.warn(`[FirestoreConversationRepo] Executing emergency arrayUnion fallback for ${conversation.phone}`);
+        let FieldValue: any = null;
+        try {
+          FieldValue = (await import('firebase-admin/firestore')).FieldValue;
+        } catch {
+          // Entorno standalone / mock
+        }
+
+        const messagesToUnion = cleanConv.messages || [];
+        const { messages: _omittedMsgs, ...stateData } = cleanConv;
+
+        if (FieldValue && typeof FieldValue.arrayUnion === 'function' && messagesToUnion.length > 0) {
+          await docRef.set({
+            ...stateData,
+            messages: FieldValue.arrayUnion(...messagesToUnion),
+          }, { merge: true });
+        } else {
+          await docRef.set(cleanConv, { merge: true });
+        }
+        logger.info(`[FirestoreConversationRepo] Emergency arrayUnion fallback succeeded for ${conversation.phone}`);
+      } catch (fallbackErr: any) {
+        logger.error(`[FirestoreConversationRepo] CRITICAL: Both transaction and arrayUnion fallback failed for ${conversation.phone}`, {
+          error: fallbackErr.message,
+          stack: fallbackErr.stack,
+        });
+        throw fallbackErr;
+      }
     }
   }
 

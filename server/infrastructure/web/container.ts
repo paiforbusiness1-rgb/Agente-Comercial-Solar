@@ -16,7 +16,7 @@ import { SofiaFlowOrchestrator } from '../../application/orchestration/SofiaFlow
 import { AppConfig } from '../../shared/config/AppConfig.js';
 import { logger } from '../../shared/logger/ConsoleLogger.js';
 import { getApps, initializeApp, cert } from 'firebase-admin/app';
-import { getFirestore } from 'firebase-admin/firestore';
+import { getFirestore, initializeFirestore } from 'firebase-admin/firestore';
 import nodemailer from 'nodemailer';
 
 // ─── Infrastructure ────────────────────────────────────────────────────────
@@ -157,7 +157,12 @@ function getRepos() {
     }
 
     if (getApps().length > 0) {
-      const db = getFirestore();
+      let db: any;
+      try {
+        db = initializeFirestore(getApps()[0], { ignoreUndefinedProperties: true } as any);
+      } catch {
+        db = getFirestore();
+      }
       logger.info('[DI] Using Firestore repositories (multi-tenant)');
       return {
         convRepo: new FirestoreConversationRepository(db),
