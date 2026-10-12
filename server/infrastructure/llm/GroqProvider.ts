@@ -1,11 +1,11 @@
 import {
   ILLMProvider, LLMMessage, LLMResponse, ToolDefinition,
-} from '../../interfaces/ILLMProvider';
+} from '../../interfaces/ILLMProvider.js';
 import { AppConfig } from '../../shared/config/AppConfig.js';
 import { logger } from '../../shared/logger/ConsoleLogger.js';
 
-const MAX_RETRIES = 3;
-const RETRY_DELAY_MS = 800;
+const MAX_RETRIES = 2;
+const RETRY_DELAY_MS = 400;
 
 async function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
@@ -13,6 +13,11 @@ async function sleep(ms: number) {
 
 export class GroqProvider implements ILLMProvider {
   private readonly endpoint = 'https://api.groq.com/openai/v1/chat/completions';
+
+  constructor(
+    private readonly timeoutMs: number = 7000,
+    private readonly customFetch?: typeof fetch
+  ) {}
 
   private get model(): string {
     return AppConfig.groq.model;
@@ -38,21 +43,25 @@ export class GroqProvider implements ILLMProvider {
       body.tool_choice = 'auto';
     }
 
+    const fetchImpl = this.customFetch || fetch;
+
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
         logger.debug(`[GroqProvider] Attempt ${attempt}/${MAX_RETRIES}`, {
           model: this.model,
           messagesCount: messages.length,
           hasTools: !!tools?.length,
+          timeoutMs: this.timeoutMs,
         });
 
-        const res = await fetch(this.endpoint, {
+        const res = await fetchImpl(this.endpoint, {
           method: 'POST',
           headers: {
             Authorization: `Bearer ${this.apiKey}`,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify(body),
+          signal: AbortSignal.timeout(this.timeoutMs),
         });
 
         if (!res.ok) {

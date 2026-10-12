@@ -3,7 +3,7 @@
  * If Firebase credentials are present → uses Firestore repos.
  * Otherwise → falls back to InMemory repos.
  */
-import { GroqProvider } from '../llm/GroqProvider.js';
+import { ResilientLLMProvider } from '../llm/ResilientLLMProvider.js';
 import { SolarQuoteEngine } from '../engines/SolarQuoteEngine.js';
 import {
   FirestoreConversationRepository,
@@ -21,7 +21,7 @@ import nodemailer from 'nodemailer';
 
 // ─── Infrastructure ────────────────────────────────────────────────────────
 const quoteEngine = new SolarQuoteEngine();
-const llmProvider = new GroqProvider();
+const llmProvider = new ResilientLLMProvider();
 
 // Email notification service
 const emailService = {

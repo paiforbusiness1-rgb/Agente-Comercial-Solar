@@ -101,13 +101,15 @@ var ConsoleLogger = class {
 var logger = new ConsoleLogger();
 
 // server/infrastructure/llm/GroqProvider.ts
-var MAX_RETRIES = 3;
-var RETRY_DELAY_MS = 800;
+var MAX_RETRIES = 2;
+var RETRY_DELAY_MS = 400;
 async function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 var GroqProvider = class {
-  constructor() {
+  constructor(timeoutMs = 7e3, customFetch) {
+    this.timeoutMs = timeoutMs;
+    this.customFetch = customFetch;
     this.endpoint = "https://api.groq.com/openai/v1/chat/completions";
   }
   get model() {
@@ -126,20 +128,23 @@ var GroqProvider = class {
       body.tools = tools.map((t) => ({ type: "function", function: t }));
       body.tool_choice = "auto";
     }
+    const fetchImpl = this.customFetch || fetch;
     for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
       try {
         logger.debug(`[GroqProvider] Attempt ${attempt}/${MAX_RETRIES}`, {
           model: this.model,
           messagesCount: messages.length,
-          hasTools: !!tools?.length
+          hasTools: !!tools?.length,
+          timeoutMs: this.timeoutMs
         });
-        const res = await fetch(this.endpoint, {
+        const res = await fetchImpl(this.endpoint, {
           method: "POST",
           headers: {
             Authorization: `Bearer ${this.apiKey}`,
             "Content-Type": "application/json"
           },
-          body: JSON.stringify(body)
+          body: JSON.stringify(body),
+          signal: AbortSignal.timeout(this.timeoutMs)
         });
         if (!res.ok) {
           const err = await res.json();
@@ -180,6 +185,79 @@ var GroqProvider = class {
       }
     }
     throw new Error("[GroqProvider] Unexpected exit from retry loop");
+  }
+};
+
+// server/infrastructure/llm/ResilientLLMProvider.ts
+var ResilientLLMProvider = class {
+  constructor(groqProvider, customFetch, geminiTimeoutMs = 7e3) {
+    this.customFetch = customFetch;
+    this.geminiTimeoutMs = geminiTimeoutMs;
+    this.geminiEndpoint = "https://generativelanguage.googleapis.com/v1beta/models";
+    this.groqProvider = groqProvider || new GroqProvider();
+  }
+  async complete(messages, tools, temperature = 0.2) {
+    const phoneMatch = messages.find((m) => m.content && m.content.includes("<phone>"))?.content.match(/<phone>([^<]+)<\/phone>/);
+    const phone = phoneMatch ? phoneMatch[1].trim() : "unknown";
+    try {
+      return await this.groqProvider.complete(messages, tools, temperature);
+    } catch (groqErr) {
+      logger.warn(
+        `[ResilientLLM] Groq timeout/failure detected. Failing over to Gemini 2.5 Flash for phone: ${phone}`,
+        { error: groqErr.message, phone }
+      );
+      return await this.callGeminiFallback(messages, temperature);
+    }
+  }
+  async callGeminiFallback(messages, temperature = 0.2) {
+    const apiKey = AppConfig.gemini.apiKey;
+    if (!apiKey) {
+      throw new Error("[ResilientLLM] GEMINI_API_KEY no configurada. Fallback no disponible.");
+    }
+    const model = AppConfig.gemini.model || "gemini-2.5-flash";
+    const endpoint = `${this.geminiEndpoint}/${model}:generateContent?key=${apiKey}`;
+    const systemMsg = messages.find((m) => m.role === "system")?.content || "";
+    const userMsgs = messages.filter((m) => m.role === "user");
+    const userPrompt = userMsgs.map((m) => m.content).join("\n\n");
+    const fetchImpl = this.customFetch || fetch;
+    try {
+      const res = await fetchImpl(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: systemMsg }] },
+          contents: [
+            {
+              role: "user",
+              parts: [{ text: userPrompt }]
+            }
+          ],
+          generationConfig: {
+            temperature,
+            responseMimeType: "application/json"
+          }
+        }),
+        signal: AbortSignal.timeout(this.geminiTimeoutMs)
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(
+          `Gemini fallback error ${res.status}: ${err?.error?.message || res.statusText}`
+        );
+      }
+      const data = await res.json();
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text ?? "";
+      return {
+        text,
+        toolCalls: [],
+        finishReason: "stop"
+      };
+    } catch (geminiErr) {
+      logger.error("[ResilientLLM] Both Groq and Gemini failed", {
+        error: geminiErr.message
+      });
+      throw geminiErr;
+    }
   }
 };
 
@@ -1274,6 +1352,7 @@ var ReceiveMessageUseCase = class {
     const phone = input.phone.replace(/[^\d]/g, "");
     const rawText = input.text || "";
     const text = rawText.trim();
+    const inboundTimestamp = input.inboundTimestamp || (/* @__PURE__ */ new Date()).toISOString();
     logger.info("[ReceiveMessageUseCase] Message received", {
       phone,
       tenantId,
@@ -1341,7 +1420,7 @@ var ReceiveMessageUseCase = class {
         conv.messages.push({
           sender: "user",
           text: text ? `${mainLabel}${extraNote} \u2014 "${text}"` : `${mainLabel}${extraNote}`,
-          timestamp: (/* @__PURE__ */ new Date()).toISOString()
+          timestamp: inboundTimestamp
         });
         conv.state.reversePageReceived = false;
         conv.state.lastBillExtractedAt = (/* @__PURE__ */ new Date()).toISOString();
@@ -1359,7 +1438,7 @@ var ReceiveMessageUseCase = class {
           if (hasExistingBill || isPostQualificationPhase || hasQuoteSent || recentBillExtracted) {
             logger.info("[ReceiveMessageUseCase] Reverse page received as supplementary document", { phone });
             userNote = "\u{1F4C4} [Reverso de recibo CFE complementario: Historial de consumo analizado]";
-            conv.messages.push({ sender: "user", text: userNote, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
+            conv.messages.push({ sender: "user", text: userNote, timestamp: inboundTimestamp });
             if (recentBillExtracted) {
               await this.convRepo.save(conv);
               return { reply: "", leadGenerated: false };
@@ -1376,7 +1455,7 @@ var ReceiveMessageUseCase = class {
             conv.state.reversePageReceived = true;
             conv.state.reversePageReceivedAt = (/* @__PURE__ */ new Date()).toISOString();
             userNote = "\u{1F4C4} [Reverso de recibo CFE detectado: Historial de consumo]";
-            conv.messages.push({ sender: "user", text: userNote, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
+            conv.messages.push({ sender: "user", text: userNote, timestamp: inboundTimestamp });
             await this.convRepo.save(conv);
             return { reply: "", leadGenerated: false };
           }
@@ -1402,7 +1481,7 @@ var ReceiveMessageUseCase = class {
         conv.messages.push({
           sender: "user",
           text: userNote,
-          timestamp: (/* @__PURE__ */ new Date()).toISOString()
+          timestamp: inboundTimestamp
         });
         conv.messages.push({ sender: "bot", text: fallbackReply, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
         conv.lastMessageAt = (/* @__PURE__ */ new Date()).toISOString();
@@ -1413,7 +1492,7 @@ var ReceiveMessageUseCase = class {
     } else if (input.isImage && (!text || !text.trim())) {
       const fallbackReply = "He recibido tu imagen. Para asegurarme de leer el monto con total precisi\xF3n, \xBFpodr\xEDas confirmarme por favor el monto total en pesos que aparece en el recibo? \xA1Gracias!";
       const conv = await this.convRepo.findByPhone(tenantId, phone);
-      conv.messages.push({ sender: "user", text: "\u{1F4F7} [Imagen de recibo adjuntada]", timestamp: (/* @__PURE__ */ new Date()).toISOString() });
+      conv.messages.push({ sender: "user", text: "\u{1F4F7} [Imagen de recibo adjuntada]", timestamp: inboundTimestamp });
       conv.messages.push({ sender: "bot", text: fallbackReply, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
       conv.lastMessageAt = (/* @__PURE__ */ new Date()).toISOString();
       await this.convRepo.save(conv);
@@ -1425,7 +1504,7 @@ var ReceiveMessageUseCase = class {
       const userMentionedBill = BillNormalizerService.preParseUserText(text);
       if (!userMentionedBill) {
         const fallbackReply = "\xA1Excelente! Recib\xED el historial de consumo de tu recibo CFE \u{1F4C4}. Para elaborar tu propuesta de ahorro solar con tu tarifa actual, \xBFpodr\xEDas compartirme tambi\xE9n el anverso (donde aparece el Total a Pagar en pesos) o confirmarme tu monto promedio?";
-        currentConv.messages.push({ sender: "user", text, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
+        currentConv.messages.push({ sender: "user", text, timestamp: inboundTimestamp });
         currentConv.messages.push({ sender: "bot", text: fallbackReply, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
         currentConv.state.reversePageReceived = false;
         currentConv.lastMessageAt = (/* @__PURE__ */ new Date()).toISOString();
@@ -1448,6 +1527,7 @@ var ReceiveMessageUseCase = class {
       phone,
       userName: input.name,
       messageText: effectiveMessageText,
+      inboundTimestamp,
       extractedBill
     });
     if (result.replyText) {
@@ -1569,13 +1649,19 @@ REGLAS ESENCIALES DE INTERACCI\xD3N Y CERO ALUCINACI\xD3N:
      "media_to_send": null
      "next_step": 2
 
-9. COMPLETITUD T\xC9CNICA EN PASO 3 (TECHO Y SOMBRAS):
+9. COMPLETITUD T\xC9CNICA EN PASO 3 (TECHO Y SOMBRAS \u2014 DESACOPLAMIENTO U-FIRST Y MANEJO DE ??):
    - En el Paso 3, se eval\xFAan DOS aspectos t\xE9cnicos indispensables: el tipo de techo (concreto, l\xE1mina, teja) y la presencia de sombras (\xE1rboles, tinacos, muros altos o edificios vecinos).
-   - Si el usuario responde sobre el tipo de techo pero omite indicar si tiene sombras (o si shadows_status es "unknown"):
-     ESTRICTAMENTE PROHIBIDO avanzar al Paso 4 de cotizaci\xF3n.
+   - DESACOPLAMIENTO SECUENCIAL (CERO PREGUNTAS COMPUESTAS):
+     a) Si no dispones del tipo de techo: pregunta \xDANICAMENTE por el tipo de techo de forma concisa:
+        "Para dise\xF1ar la soluci\xF3n ideal para ti, \xBFqu\xE9 tipo de techo tienes en tu propiedad (concreto, l\xE1mina o teja)? \u{1F3E2}"
+     b) Si ya dispones del tipo de techo pero faltan las sombras: agradece el techo y pregunta por las sombras con salida r\xE1pida facilitada:
+        "\xA1Excelente, techo de [tipo]! \u{1F3E2} Y respecto a posibles sombras de \xE1rboles o tinacos durante el d\xEDa, \xBFhay alguna sobre tu techo, o est\xE1 completamente despejado? \u2600\uFE0F"
+   - MANEJO EMP\xC1TICO DE "??" O CONFUSI\xD3N (Refinamiento 1 - Regla 4 U-First):
+     Si el usuario env\xEDa signos de interrogaci\xF3n ("??", "\xBF?", "?") o pregunta si sigues ah\xED cuando ya se cuenta con el tipo de techo pero faltan las sombras:
+     PROHIBIDO repetir la pregunta id\xE9ntica o asumir "sin sombras" a ciegas.
+     Sof\xEDa DEBE responder con empat\xEDa, explicando la raz\xF3n t\xE9cnica y ofreciendo la salida de baja fricci\xF3n con confirmaci\xF3n expl\xEDcita:
+     "\xA1Aqu\xED sigo contigo, [Nombre]! \u{1F60A} Disculpa si me trab\xE9. Para darte tu cotizaci\xF3n exacta, solo necesito saber si tu techo tiene sombras (de \xE1rboles o tinacos). Si no est\xE1s seguro, podemos asumir que est\xE1 despejado y nuestros ingenieros lo confirman en la visita gratuita. \xBFTe parece bien?"
      Mant\xE9n obligatoriamente "next_step": 3.
-     Agradece el dato del tipo de techo y pregunta amablemente sobre las sombras:
-     "\xA1Excelente, techo de [tipo]! \u{1F3E2} Y respecto a posibles sombras de \xE1rboles, tinacos o construcciones vecinas, \xBFhay alguna que le d\xE9 a tu techo durante el d\xEDa?"
    - Extrae obligatoriamente:
      - "roof_type": tipo de techo indicado.
      - "shadows_status": "none" (sin sombras / despejado), "present" (hay sombras), o "unknown" (no mencionado/pendiente).
@@ -2378,7 +2464,7 @@ var SofiaFlowOrchestrator = class {
       [],
       0.2
     );
-    const parsed = SofiaPromptBuilder.parseResponse(rawLlmOutput.text || "");
+    const parsed = SofiaPromptBuilder.parseResponse(rawLlmOutput?.text || "");
     if (parsed.returning_user_greeted) {
       conv.state.returningUserAcknowledged = true;
     }
@@ -2452,12 +2538,31 @@ var SofiaFlowOrchestrator = class {
     if (parsed.propose_technical_visit) {
       conv.state.technicalVisitProposed = true;
     }
+    const isLivenessOrConfusion = /^(?:\?+|¿\?+|\?¿+|hola\?*|sigues ah[ií]\?*|sigues ahi\?*|est[aá]s ah[ií]\?*)$/i.test(messageText.trim());
+    const lastBotMessage = conv.messages.slice().reverse().find((m) => m.sender === "bot" && !m.text.startsWith("\u{1F4C4}"))?.text || "";
+    const wasLowFrictionOffer = lastBotMessage.includes("podemos asumir que est\xE1 despejado");
     let effectiveNextStep = parsed.next_step;
-    if (conv.state.roofType && conv.state.shadowsAssessed !== true && effectiveNextStep >= 4) {
-      effectiveNextStep = 3;
-      const asksAboutShades = /(?:sombra|tinaco|árbol|arbol|edificio|muro|obstrucci[oó]n)/i.test(finalReply);
-      if (!asksAboutShades) {
-        finalReply = `\xA1Excelente, techo de ${conv.state.roofType}! \u{1F3E2} Y respecto a posibles sombras de \xE1rboles, tinacos o construcciones vecinas, \xBFhay alguna que le d\xE9 a tu techo durante el d\xEDa?`;
+    if (wasLowFrictionOffer && explicitAffirmative && conv.state.roofType && conv.state.shadowsAssessed !== true) {
+      conv.state.hasShade = false;
+      conv.state.shadowsAssessed = true;
+      conv.state.shadows_assessed = true;
+      if (effectiveNextStep < 4) {
+        effectiveNextStep = 4;
+      }
+      finalReply = `\xA1Excelente! Asumimos techo despejado por ahora y lo validamos en sitio. Con tu consumo, tu sistema ideal es de aproximadamente ${calculatedQuoteInfo?.panels || 4} paneles solares de alta eficiencia. \xBFTe gustar\xEDa que te presente la propuesta preliminar de inversi\xF3n y ahorro estimado? \u{1F60A}`;
+      conv.state.quoteConsentRequested = true;
+    } else if (conv.state.roofType && conv.state.shadowsAssessed !== true) {
+      if (isLivenessOrConfusion) {
+        effectiveNextStep = 3;
+        const displayName = conv.nombre && conv.nombre !== "Cliente" ? conv.nombre : conv.state.whatsappProfileName || "";
+        const nameGreeting = displayName ? `\xA1Aqu\xED sigo contigo, ${displayName}! \u{1F60A}` : "\xA1Aqu\xED sigo contigo! \u{1F60A}";
+        finalReply = `${nameGreeting} Disculpa si me trab\xE9. Para darte tu cotizaci\xF3n exacta, solo necesito saber si tu techo tiene sombras (de \xE1rboles o tinacos). Si no est\xE1s seguro, podemos asumir que est\xE1 despejado y nuestros ingenieros lo confirman en la visita gratuita. \xBFTe parece bien?`;
+      } else if (effectiveNextStep >= 4) {
+        effectiveNextStep = 3;
+        const asksAboutShades = /(?:sombra|tinaco|árbol|arbol|edificio|muro|obstrucci[oó]n)/i.test(finalReply);
+        if (!asksAboutShades) {
+          finalReply = `\xA1Excelente, techo de ${conv.state.roofType}! \u{1F3E2} Y respecto a posibles sombras de \xE1rboles o tinacos durante el d\xEDa, \xBFhay alguna sobre tu techo, o est\xE1 completamente despejado? \u2600\uFE0F`;
+        }
       }
     }
     const isQuoteNotYetSent = !conv.state.completedSteps.includes("QUOTE_SENT");
@@ -2477,7 +2582,8 @@ var SofiaFlowOrchestrator = class {
         location: conv.state.location
       };
       const pdfResult = await QuotePdfService.generateQuote(quoteDto);
-      let cleanUserMsg = parsed.message_to_user.replace(/(?:[-*•]\s*)?\*?(?:Sistema|Costo estimado|Inversión estimada|Inversion estimada|Ahorro mensual|Ahorro anual|Retorno de inversión|Retorno de inversion)\*?:?.*(?:\r?\n|$)/gi, "").trim();
+      const baseIntro = finalReply && finalReply !== parsed.message_to_user ? finalReply : parsed.message_to_user;
+      let cleanUserMsg = baseIntro.replace(/(?:[-*•]\s*)?\*?(?:Sistema|Costo estimado|Inversión estimada|Inversion estimada|Ahorro mensual|Ahorro anual|Retorno de inversión|Retorno de inversion)\*?:?.*(?:\r?\n|$)/gi, "").trim();
       finalReply = this.formatQuoteSandwichReply(cleanUserMsg, pdfResult.textSummary, conv.nombre || "Cliente");
       conv.state.completedSteps.push("QUOTE_SENT");
     }
@@ -2541,7 +2647,11 @@ Mientras me pasas el dato, te comparto informaci\xF3n detallada de nuestro servi
 ${finalReply}`;
       }
     }
-    conv.messages.push({ sender: "user", text: messageText, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
+    conv.messages.push({
+      sender: "user",
+      text: messageText,
+      timestamp: input.inboundTimestamp || (/* @__PURE__ */ new Date()).toISOString()
+    });
     conv.messages.push({ sender: "bot", text: finalReply, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
     if (mediaSent.some((m) => m.includes("INSTALACION_PROFESIONAL"))) {
       conv.messages.push({
@@ -2709,7 +2819,7 @@ import { getApps as getApps2, initializeApp, cert } from "firebase-admin/app";
 import { getFirestore } from "firebase-admin/firestore";
 import nodemailer2 from "nodemailer";
 var quoteEngine = new SolarQuoteEngine();
-var llmProvider = new GroqProvider();
+var llmProvider = new ResilientLLMProvider();
 var emailService = {
   async sendLeadNotification(leadData) {
     const { server, port, user, pass, salesEmail } = AppConfig.smtp;
@@ -3474,6 +3584,7 @@ v2Router.post("/whatsapp-webhook", async (req, res) => {
   let mediaType;
   let mediaFilename;
   let mediaAttachments = [];
+  let inboundTimestamp;
   const body = req.body;
   try {
     if (body.entry?.[0]?.changes?.[0]?.value) {
@@ -3483,6 +3594,12 @@ v2Router.post("/whatsapp-webhook", async (req, res) => {
       if (val.messages && val.messages.length > 0) {
         phone = val.messages[0].from;
         name = val.contacts?.[0]?.profile?.name || "Cliente WhatsApp";
+        if (val.messages[0].timestamp) {
+          const rawEpoch = parseInt(val.messages[0].timestamp, 10);
+          if (!isNaN(rawEpoch) && rawEpoch > 0) {
+            inboundTimestamp = new Date(rawEpoch * 1e3).toISOString();
+          }
+        }
         const textParts = [];
         for (const msg of val.messages) {
           if (msg.type === "image" || msg.image) {
@@ -3585,7 +3702,8 @@ v2Router.post("/whatsapp-webhook", async (req, res) => {
       mediaId,
       mediaType,
       mediaFilename,
-      mediaAttachments
+      mediaAttachments,
+      inboundTimestamp
     });
   } catch (err) {
     logger.error("[v2 Webhook] Unhandled error", { error: err.message, stack: err.stack });

@@ -40,6 +40,7 @@ export interface IncomingMessage {
   mediaType?: 'image' | 'document' | 'audio' | 'video' | 'other';
   mediaFilename?: string;
   mediaAttachments?: MediaAttachmentItem[]; // Refinamiento 1 (APO-014)
+  inboundTimestamp?: string; // Refinamiento 3 (APO-017)
 }
 
 export class ReceiveMessageUseCase {
@@ -63,6 +64,7 @@ export class ReceiveMessageUseCase {
     const phone = input.phone.replace(/[^\d]/g, '');
     const rawText = input.text || '';
     const text = rawText.trim();
+    const inboundTimestamp = input.inboundTimestamp || new Date().toISOString();
 
     logger.info('[ReceiveMessageUseCase] Message received', {
       phone,
@@ -149,7 +151,7 @@ export class ReceiveMessageUseCase {
         conv.messages.push({
           sender: 'user',
           text: text ? `${mainLabel}${extraNote} — "${text}"` : `${mainLabel}${extraNote}`,
-          timestamp: new Date().toISOString(),
+          timestamp: inboundTimestamp,
         });
         conv.state.reversePageReceived = false;
         conv.state.lastBillExtractedAt = new Date().toISOString();
@@ -173,7 +175,7 @@ export class ReceiveMessageUseCase {
             // Escenario 1: Reverso Complementario Posterior (T50) o ráfaga multi-webhook reciente (T48)
             logger.info('[ReceiveMessageUseCase] Reverse page received as supplementary document', { phone });
             userNote = '📄 [Reverso de recibo CFE complementario: Historial de consumo analizado]';
-            conv.messages.push({ sender: 'user', text: userNote, timestamp: new Date().toISOString() });
+            conv.messages.push({ sender: 'user', text: userNote, timestamp: inboundTimestamp });
 
             // Si el anverso fue procesado en los últimos 30 segundos, suprimir respuesta duplicada para no interrumpir (T48)
             if (recentBillExtracted) {
@@ -197,7 +199,7 @@ export class ReceiveMessageUseCase {
             conv.state.reversePageReceived = true;
             conv.state.reversePageReceivedAt = new Date().toISOString();
             userNote = '📄 [Reverso de recibo CFE detectado: Historial de consumo]';
-            conv.messages.push({ sender: 'user', text: userNote, timestamp: new Date().toISOString() });
+            conv.messages.push({ sender: 'user', text: userNote, timestamp: inboundTimestamp });
             await this.convRepo.save(conv);
             // Silencio intencional: NO se llama a sendWhatsApp para evitar contradicción si el anverso viene en camino
             return { reply: '', leadGenerated: false };
@@ -234,7 +236,7 @@ export class ReceiveMessageUseCase {
         conv.messages.push({
           sender: 'user',
           text: userNote,
-          timestamp: new Date().toISOString(),
+          timestamp: inboundTimestamp,
         });
         conv.messages.push({ sender: 'bot', text: fallbackReply, timestamp: new Date().toISOString() });
         conv.lastMessageAt = new Date().toISOString();
@@ -247,7 +249,7 @@ export class ReceiveMessageUseCase {
       const fallbackReply =
         'He recibido tu imagen. Para asegurarme de leer el monto con total precisión, ¿podrías confirmarme por favor el monto total en pesos que aparece en el recibo? ¡Gracias!';
       const conv = await this.convRepo.findByPhone(tenantId, phone);
-      conv.messages.push({ sender: 'user', text: '📷 [Imagen de recibo adjuntada]', timestamp: new Date().toISOString() });
+      conv.messages.push({ sender: 'user', text: '📷 [Imagen de recibo adjuntada]', timestamp: inboundTimestamp });
       conv.messages.push({ sender: 'bot', text: fallbackReply, timestamp: new Date().toISOString() });
       conv.lastMessageAt = new Date().toISOString();
       await this.convRepo.save(conv);
@@ -262,7 +264,7 @@ export class ReceiveMessageUseCase {
       if (!userMentionedBill) {
         const fallbackReply =
           '¡Excelente! Recibí el historial de consumo de tu recibo CFE 📄. Para elaborar tu propuesta de ahorro solar con tu tarifa actual, ¿podrías compartirme también el anverso (donde aparece el Total a Pagar en pesos) o confirmarme tu monto promedio?';
-        currentConv.messages.push({ sender: 'user', text, timestamp: new Date().toISOString() });
+        currentConv.messages.push({ sender: 'user', text, timestamp: inboundTimestamp });
         currentConv.messages.push({ sender: 'bot', text: fallbackReply, timestamp: new Date().toISOString() });
         currentConv.state.reversePageReceived = false;
         currentConv.lastMessageAt = new Date().toISOString();
@@ -297,6 +299,7 @@ export class ReceiveMessageUseCase {
       phone,
       userName: input.name,
       messageText: effectiveMessageText,
+      inboundTimestamp,
       extractedBill,
     });
 

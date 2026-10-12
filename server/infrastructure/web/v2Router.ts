@@ -232,6 +232,7 @@ v2Router.post('/whatsapp-webhook', async (req: Request, res: Response) => {
   let mediaType: 'image' | 'document' | 'audio' | 'video' | 'other' | undefined;
   let mediaFilename: string | undefined;
   let mediaAttachments: Array<{ mediaId: string; mediaType?: 'image' | 'document' | 'audio' | 'video' | 'other'; mediaFilename?: string }> = [];
+  let inboundTimestamp: string | undefined;
   const body = req.body;
 
   try {
@@ -244,6 +245,13 @@ v2Router.post('/whatsapp-webhook', async (req: Request, res: Response) => {
       if (val.messages && val.messages.length > 0) {
         phone = val.messages[0].from;
         name = val.contacts?.[0]?.profile?.name || 'Cliente WhatsApp';
+
+        if (val.messages[0].timestamp) {
+          const rawEpoch = parseInt(val.messages[0].timestamp, 10);
+          if (!isNaN(rawEpoch) && rawEpoch > 0) {
+            inboundTimestamp = new Date(rawEpoch * 1000).toISOString();
+          }
+        }
 
         const textParts: string[] = [];
 
@@ -359,6 +367,7 @@ v2Router.post('/whatsapp-webhook', async (req: Request, res: Response) => {
       mediaType,
       mediaFilename,
       mediaAttachments,
+      inboundTimestamp,
     });
   } catch (err: any) {
     logger.error('[v2 Webhook] Unhandled error', { error: err.message, stack: err.stack });

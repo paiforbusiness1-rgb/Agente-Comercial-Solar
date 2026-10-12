@@ -28,6 +28,7 @@ export interface OrchestrationInput {
   phone: string;
   userName?: string;
   messageText: string;
+  inboundTimestamp?: string;
   extractedBill?: {
     amount: number;
     frequency?: 'mensual' | 'bimestral';
@@ -205,7 +206,7 @@ export class SofiaFlowOrchestrator {
       0.2
     );
 
-    const parsed: SofiaLlmResponse = SofiaPromptBuilder.parseResponse(rawLlmOutput.text || '');
+    const parsed: SofiaLlmResponse = SofiaPromptBuilder.parseResponse(rawLlmOutput?.text || '');
 
     if (parsed.returning_user_greeted) {
       (conv.state as any).returningUserAcknowledged = true;
@@ -299,13 +300,41 @@ export class SofiaFlowOrchestrator {
       conv.state.technicalVisitProposed = true;
     }
 
-    // Refinamiento 2: Completitud Técnica Dirigida por Estado (Sombras en Paso 3)
+    // Refinamiento 1 (APO-017): Manejo Empático de "??" con Salida de Baja Fricción, NO Asunción Ciega
+    const isLivenessOrConfusion = /^(?:\?+|¿\?+|\?¿+|hola\?*|sigues ah[ií]\?*|sigues ahi\?*|est[aá]s ah[ií]\?*)$/i.test(messageText.trim());
+
+    // Si el bot ofreció previamente asumir sin sombras ante la duda y el usuario confirmó expresamente:
+    const lastBotMessage = conv.messages
+      .slice()
+      .reverse()
+      .find(m => m.sender === 'bot' && !m.text.startsWith('📄'))?.text || '';
+    const wasLowFrictionOffer = lastBotMessage.includes('podemos asumir que está despejado');
+
     let effectiveNextStep = parsed.next_step;
-    if (conv.state.roofType && conv.state.shadowsAssessed !== true && effectiveNextStep >= 4) {
-      effectiveNextStep = 3;
-      const asksAboutShades = /(?:sombra|tinaco|árbol|arbol|edificio|muro|obstrucci[oó]n)/i.test(finalReply);
-      if (!asksAboutShades) {
-        finalReply = `¡Excelente, techo de ${conv.state.roofType}! 🏢 Y respecto a posibles sombras de árboles, tinacos o construcciones vecinas, ¿hay alguna que le dé a tu techo durante el día?`;
+
+    if (wasLowFrictionOffer && explicitAffirmative && conv.state.roofType && conv.state.shadowsAssessed !== true) {
+      conv.state.hasShade = false;
+      conv.state.shadowsAssessed = true;
+      conv.state.shadows_assessed = true;
+      if (effectiveNextStep < 4) {
+        effectiveNextStep = 4;
+      }
+      finalReply = `¡Excelente! Asumimos techo despejado por ahora y lo validamos en sitio. Con tu consumo, tu sistema ideal es de aproximadamente ${calculatedQuoteInfo?.panels || 4} paneles solares de alta eficiencia. ¿Te gustaría que te presente la propuesta preliminar de inversión y ahorro estimado? 😊`;
+      conv.state.quoteConsentRequested = true;
+    } else if (conv.state.roofType && conv.state.shadowsAssessed !== true) {
+      if (isLivenessOrConfusion) {
+        effectiveNextStep = 3;
+        const displayName = conv.nombre && conv.nombre !== 'Cliente'
+          ? conv.nombre
+          : ((conv.state as any).whatsappProfileName || '');
+        const nameGreeting = displayName ? `¡Aquí sigo contigo, ${displayName}! 😊` : '¡Aquí sigo contigo! 😊';
+        finalReply = `${nameGreeting} Disculpa si me trabé. Para darte tu cotización exacta, solo necesito saber si tu techo tiene sombras (de árboles o tinacos). Si no estás seguro, podemos asumir que está despejado y nuestros ingenieros lo confirman en la visita gratuita. ¿Te parece bien?`;
+      } else if (effectiveNextStep >= 4) {
+        effectiveNextStep = 3;
+        const asksAboutShades = /(?:sombra|tinaco|árbol|arbol|edificio|muro|obstrucci[oó]n)/i.test(finalReply);
+        if (!asksAboutShades) {
+          finalReply = `¡Excelente, techo de ${conv.state.roofType}! 🏢 Y respecto a posibles sombras de árboles o tinacos durante el día, ¿hay alguna sobre tu techo, o está completamente despejado? ☀️`;
+        }
       }
     }
 
@@ -332,7 +361,8 @@ export class SofiaFlowOrchestrator {
       const pdfResult = await QuotePdfService.generateQuote(quoteDto);
       
       // Desduplicación en Turno 4 (Anti-Redundancia): eliminar viñetas que repliquen la tarjeta oficial
-      let cleanUserMsg = parsed.message_to_user
+      const baseIntro = finalReply && finalReply !== parsed.message_to_user ? finalReply : parsed.message_to_user;
+      let cleanUserMsg = baseIntro
         .replace(/(?:[-*•]\s*)?\*?(?:Sistema|Costo estimado|Inversión estimada|Inversion estimada|Ahorro mensual|Ahorro anual|Retorno de inversión|Retorno de inversion)\*?:?.*(?:\r?\n|$)/gi, '')
         .trim();
 
@@ -425,7 +455,11 @@ export class SofiaFlowOrchestrator {
     }
 
     // Append messages to conversation history
-    conv.messages.push({ sender: 'user', text: messageText, timestamp: new Date().toISOString() });
+    conv.messages.push({
+      sender: 'user',
+      text: messageText,
+      timestamp: input.inboundTimestamp || new Date().toISOString(),
+    });
     conv.messages.push({ sender: 'bot', text: finalReply, timestamp: new Date().toISOString() });
     if (mediaSent.some(m => m.includes('INSTALACION_PROFESIONAL'))) {
       conv.messages.push({
