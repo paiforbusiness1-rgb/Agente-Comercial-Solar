@@ -1,13 +1,15 @@
 /**
  * ReceiveMessageUseCase.ts
  * Caso de Uso Principal para Recepción y Procesamiento de Mensajes de WhatsApp.
- * Arquitectura Trimodal (APO-012):
+ * Arquitectura Cuatrimodal (APO-014):
  * - Caso 1: Documentos PDF (Descarga + Extracción CFE).
  * - Caso 2: Imágenes / Fotos de Recibo (Descarga + OCR Multimodal Vision).
  * - Caso 3: Texto Directo (BillNormalizerService).
  * - Caso Híbrido: Archivo + Texto (Extracción combinada simultánea).
+ * - Multi-Adjunto (Refinamiento 1): Consolidación de múltiples archivos con una sola respuesta.
+ * - Taxonomía U-First (Refinamiento 3): Clasificación empática (Reverso, Ilegible, No-CFE, Falla de Infraestructura).
  * - Size Guard (SSD): Protección ante archivos > 5 MB.
- * - Validación Zod (MCP): Cortafuegos semántico contra alucinaciones.
+ * - Validación Zod (MCP): Unión discriminada estricta anti-alucinaciones.
  */
 
 import { IConversationRepository } from '../../domain/repositories/IConversationRepository.js';
@@ -15,7 +17,17 @@ import { SofiaFlowOrchestrator } from '../orchestration/SofiaFlowOrchestrator.js
 import { logger } from '../../shared/logger/ConsoleLogger.js';
 import { AppConfig } from '../../shared/config/AppConfig.js';
 import { WhatsAppMediaService } from '../../infrastructure/media/WhatsAppMediaService.js';
-import { CfeReceiptExtractorService, CfeReceiptData } from '../../domain/services/CfeReceiptExtractorService.js';
+import {
+  CfeReceiptExtractorService,
+  CfeReceiptData,
+  CfeExtractionResult,
+} from '../../domain/services/CfeReceiptExtractorService.js';
+
+export interface MediaAttachmentItem {
+  mediaId: string;
+  mediaType?: 'image' | 'document' | 'audio' | 'video' | 'other';
+  mediaFilename?: string;
+}
 
 export interface IncomingMessage {
   phone: string;
@@ -26,6 +38,7 @@ export interface IncomingMessage {
   mediaId?: string;
   mediaType?: 'image' | 'document' | 'audio' | 'video' | 'other';
   mediaFilename?: string;
+  mediaAttachments?: MediaAttachmentItem[]; // Refinamiento 1 (APO-014)
 }
 
 export class ReceiveMessageUseCase {
@@ -46,7 +59,6 @@ export class ReceiveMessageUseCase {
 
   async execute(input: IncomingMessage): Promise<{ reply: string; leadGenerated: boolean }> {
     const tenantId = input.tenantId || AppConfig.tenant.defaultId;
-    // Preservar número limpio
     const phone = input.phone.replace(/[^\d]/g, '');
     const rawText = input.text || '';
     const text = rawText.trim();
@@ -58,83 +70,128 @@ export class ReceiveMessageUseCase {
       isImage: Boolean(input.isImage),
       mediaType: input.mediaType,
       mediaId: input.mediaId,
+      attachmentsCount: input.mediaAttachments?.length || (input.mediaId ? 1 : 0),
     });
 
     let extractedData: CfeReceiptData | null = null;
+    let successfulReceiptSource: 'pdf' | 'image' = input.mediaType === 'document' ? 'pdf' : 'image';
 
-    // ─── FASE 1: PROCESAMIENTO DE ARCHIVO MULTIMEDIA (PDF O IMAGEN) ─────────
-    if (input.mediaId) {
-      // 1. Descarga segura con Size Guard de 5 MB (Refinamiento 1: SSD)
-      const downloadResult = await this.mediaService.downloadMedia(input.mediaId, input.mediaFilename);
+    // ─── FASE 1: PROCESAMIENTO DE ARCHIVOS MULTIMEDIA (REF. 1: CONSOLIDACIÓN MULTI-ADJUNTO) ───
+    const rawAttachments: MediaAttachmentItem[] =
+      input.mediaAttachments && input.mediaAttachments.length > 0
+        ? input.mediaAttachments
+        : input.mediaId
+        ? [{ mediaId: input.mediaId, mediaType: input.mediaType, mediaFilename: input.mediaFilename }]
+        : [];
 
-      if (!downloadResult.success) {
-        if ('error' in downloadResult && downloadResult.error === 'size_exceeded') {
-          const sizeRejectReply =
-            'El archivo que enviaste es demasiado pesado para procesarlo directamente por aquí (máximo 5 MB). 📁 ¿Podrías compartirme una foto más ligera o indicarme el monto de tu recibo en texto?';
-          const conv = await this.convRepo.findByPhone(tenantId, phone);
-          conv.messages.push({
-            sender: 'user',
-            text: `📎 [Archivo rechazado: ${input.mediaFilename || 'Recibo'} - Tamaño excede 5MB]`,
-            timestamp: new Date().toISOString(),
-          });
-          conv.messages.push({ sender: 'bot', text: sizeRejectReply, timestamp: new Date().toISOString() });
-          conv.lastMessageAt = new Date().toISOString();
-          await this.convRepo.save(conv);
-          await this.sendWhatsApp(phone, sizeRejectReply);
-          return { reply: sizeRejectReply, leadGenerated: false };
-        } else {
-          const fetchFailedReply =
-            'Tuve un pequeño problema al descargar tu archivo desde WhatsApp. 📁 ¿Podrías volver a enviármelo o indicarme el monto aproximado de tu recibo en texto?';
-          const conv = await this.convRepo.findByPhone(tenantId, phone);
-          conv.messages.push({
-            sender: 'user',
-            text: `📎 [Error al descargar archivo: ${input.mediaFilename || 'Recibo'}]`,
-            timestamp: new Date().toISOString(),
-          });
-          conv.messages.push({ sender: 'bot', text: fetchFailedReply, timestamp: new Date().toISOString() });
-          conv.lastMessageAt = new Date().toISOString();
-          await this.convRepo.save(conv);
-          await this.sendWhatsApp(phone, fetchFailedReply);
-          return { reply: fetchFailedReply, leadGenerated: false };
+    if (rawAttachments.length > 0) {
+      let primarySuccessData: CfeReceiptData | null = null;
+      let reverseDetected = false;
+      let nonCfeDetected = false;
+      let unreadableDetected = false;
+      let infraError: { errorType: string; message: string } | null = null;
+      let sizeExceeded = false;
+      let fetchFailed = false;
+      const processedLabels: string[] = [];
+
+      for (const att of rawAttachments) {
+        const downloadResult = await this.mediaService.downloadMedia(att.mediaId, att.mediaFilename);
+        if (!downloadResult.success) {
+          if ('error' in downloadResult && downloadResult.error === 'size_exceeded') {
+            sizeExceeded = true;
+          } else {
+            fetchFailed = true;
+          }
+          continue;
         }
-      } else {
-        // 2. Extracción Inteligente de Recibo CFE (PDF o Imagen)
-        extractedData = await this.extractorService.extractFromReceipt(
+
+        const analysis: CfeExtractionResult = await this.extractorService.analyzeReceipt(
           downloadResult.buffer,
           downloadResult.mimeType,
           downloadResult.filename
         );
 
-        const conv = await this.convRepo.findByPhone(tenantId, phone);
-
-        // Caso Borde: Fallo de extracción Zod / Baja confianza (Refinamiento 2)
-        if (!extractedData) {
-          const fallbackReply =
-            'Recibí tu archivo, pero la imagen se ve un poco borrosa y no logro distinguir con certeza el monto total a pagar. Para no darte un cálculo incorrecto, ¿me podrías confirmar la cantidad exacta que aparece en tu recibo?';
-          conv.messages.push({
-            sender: 'user',
-            text: `📎 [Archivo adjuntado: ${input.mediaFilename || 'Recibo CFE'} - Ilegible]`,
-            timestamp: new Date().toISOString(),
-          });
-          conv.messages.push({ sender: 'bot', text: fallbackReply, timestamp: new Date().toISOString() });
-          conv.lastMessageAt = new Date().toISOString();
-          await this.convRepo.save(conv);
-          await this.sendWhatsApp(phone, fallbackReply);
-          return { reply: fallbackReply, leadGenerated: false };
+        if (analysis.status === 'SUCCESS') {
+          if (!primarySuccessData) {
+            primarySuccessData = analysis.data;
+            successfulReceiptSource = att.mediaType === 'document' ? 'pdf' : 'image';
+            const label =
+              att.mediaType === 'document'
+                ? `📄 [Documento PDF analizado: ${att.mediaFilename || 'Recibo CFE'} - $${analysis.data.montoTotal.toLocaleString('es-MX')} MXN]`
+                : `📷 [Foto de recibo analizada: $${analysis.data.montoTotal.toLocaleString('es-MX')} MXN]`;
+            processedLabels.push(label);
+          }
+        } else if (analysis.status === 'REVERSE_PAGE') {
+          reverseDetected = true;
+          processedLabels.push(`📄 [Reverso de recibo CFE detectado: Historial de consumo]`);
+        } else if (analysis.status === 'NON_CFE') {
+          nonCfeDetected = true;
+          processedLabels.push(`📎 [Archivo adjuntado: ${att.mediaFilename || 'Documento'} - No corresponde a CFE]`);
+        } else if (analysis.status === 'UNREADABLE') {
+          unreadableDetected = true;
+          processedLabels.push(`📎 [Archivo adjuntado: ${att.mediaFilename || 'Recibo CFE'} - Ilegible]`);
+        } else if (analysis.status === 'INFRASTRUCTURE_ERROR') {
+          infraError = { errorType: analysis.errorType, message: analysis.message };
+          processedLabels.push(`⚠️ [Intermitencia técnica al procesar ${att.mediaFilename || 'archivo'}]`);
         }
+      }
 
-        // Caso Exitoso (Caso 1 o Caso 2): Monto extraído con alta confianza
-        const mediaLabel =
-          input.mediaType === 'document'
-            ? `📄 [Documento PDF analizado: ${input.mediaFilename || 'Recibo CFE'} - $${extractedData.montoTotal.toLocaleString('es-MX')} MXN]`
-            : `📷 [Foto de recibo analizada: $${extractedData.montoTotal.toLocaleString('es-MX')} MXN]`;
+      const conv = await this.convRepo.findByPhone(tenantId, phone);
 
+      // CASO A: Se extrajo con éxito el Anverso (incluso si venía acompañado de un reverso)
+      if (primarySuccessData) {
+        extractedData = primarySuccessData;
+        const mainLabel = processedLabels[0] || `📄 [Recibo CFE analizado: $${extractedData.montoTotal.toLocaleString('es-MX')} MXN]`;
+        const extraNote = reverseDetected ? ' (Anverso y Reverso analizados)' : '';
         conv.messages.push({
           sender: 'user',
-          text: text ? `${mediaLabel} — "${text}"` : mediaLabel,
+          text: text ? `${mainLabel}${extraNote} — "${text}"` : `${mainLabel}${extraNote}`,
           timestamp: new Date().toISOString(),
         });
         await this.convRepo.save(conv);
+      }
+      // CASO B: No hubo anverso válido, responder según taxonomía U-First consolidada
+      else {
+        let fallbackReply = '';
+        let userNote = '';
+
+        if (reverseDetected) {
+          fallbackReply =
+            '¡Excelente! Recibí el historial de consumo de tu recibo CFE 📄. Para elaborar tu propuesta de ahorro solar con tu tarifa actual, ¿podrías compartirme también el anverso (donde aparece el Total a Pagar en pesos) o confirmarme tu monto promedio?';
+          userNote = '📄 [Reverso de recibo CFE adjuntado: Historial de consumo]';
+        } else if (infraError) {
+          fallbackReply =
+            'Recibí tu recibo de CFE 📄, pero tuve una pequeña intermitencia técnica momentánea al leer los datos de forma automática. Para no hacerte esperar, ¿me podrías confirmar la cantidad exacta que aparece en tu recibo?';
+          userNote = `⚠️ [Intermitencia técnica al procesar archivo: ${infraError.errorType}]`;
+        } else if (sizeExceeded) {
+          fallbackReply =
+            'El archivo que enviaste es demasiado pesado para procesarlo directamente por aquí (máximo 5 MB). 📁 ¿Podrías compartirme una foto más ligera o indicarme el monto de tu recibo en texto?';
+          userNote = `📎 [Archivo rechazado: ${rawAttachments[0]?.mediaFilename || 'Recibo'} - Tamaño excede 5MB]`;
+        } else if (fetchFailed) {
+          fallbackReply =
+            'Tuve un pequeño problema al descargar tu archivo desde WhatsApp. 📁 ¿Podrías volver a enviármelo o indicarme el monto aproximado de tu recibo en texto?';
+          userNote = `📎 [Error al descargar archivo: ${rawAttachments[0]?.mediaFilename || 'Recibo'}]`;
+        } else if (nonCfeDetected) {
+          fallbackReply =
+            'Recibí tu archivo, pero parece que no corresponde a una factura de CFE 📄. ¿Podrías compartirme tu factura de luz de CFE o indicarme cuánto pagas al bimestre/mes?';
+          userNote = `📎 [Archivo adjuntado: ${rawAttachments[0]?.mediaFilename || 'Documento'} - No corresponde a CFE]`;
+        } else {
+          // unreadableDetected o default
+          fallbackReply =
+            'Recibí tu archivo, pero la imagen se ve un poco borrosa y no logro distinguir con certeza el monto total a pagar. Para no darte un cálculo incorrecto, ¿me podrías confirmar la cantidad exacta que aparece en tu recibo?';
+          userNote = `📎 [Archivo adjuntado: ${rawAttachments[0]?.mediaFilename || 'Recibo CFE'} - Ilegible]`;
+        }
+
+        conv.messages.push({
+          sender: 'user',
+          text: userNote,
+          timestamp: new Date().toISOString(),
+        });
+        conv.messages.push({ sender: 'bot', text: fallbackReply, timestamp: new Date().toISOString() });
+        conv.lastMessageAt = new Date().toISOString();
+        await this.convRepo.save(conv);
+        await this.sendWhatsApp(phone, fallbackReply);
+        return { reply: fallbackReply, leadGenerated: false };
       }
     } else if (input.isImage && (!text || !text.trim())) {
       // Compatibilidad Legacy (APO-008): Imagen sin mediaId directo (Simulador / Pruebas unitarias directas)
@@ -150,23 +207,21 @@ export class ReceiveMessageUseCase {
     }
 
     // ─── FASE 2: ORQUESTACIÓN CONVERSACIONAL (PAYLOADS HÍBRIDOS & TEXTO DIRECTO) ───
-    // Si se extrajo un monto del archivo, se inyecta en el orquestador
     const extractedBill = extractedData
       ? {
           amount: extractedData.montoTotal,
           frequency: extractedData.periodo,
           tariff: extractedData.tarifa,
-          receiptSource: (input.mediaType === 'document' ? 'pdf' : 'image') as 'pdf' | 'image',
+          receiptSource: successfulReceiptSource,
         }
       : undefined;
 
-    // Refinamiento 3: Payload Híbrido -> Si el usuario mandó texto (ej. "Soy Héctor"), se conserva;
-    // si no mandó texto, se genera un mensaje contextual para que Sofía formule su respuesta WOW
-    const effectiveMessageText = text.length > 0 
-      ? text 
-      : extractedBill 
-      ? `Adjunto mi recibo de luz de ${extractedBill.amount} pesos` 
-      : '';
+    const effectiveMessageText =
+      text.length > 0
+        ? text
+        : extractedBill
+        ? `Adjunto mi recibo de luz de ${extractedBill.amount} pesos`
+        : '';
 
     // 3. Procesar mensaje a través del orquestador de 6 pasos
     const result = await this.orchestrator.processMessage({
@@ -204,12 +259,9 @@ export class ReceiveMessageUseCase {
     return { reply: result.replyText, leadGenerated: result.botDisabled };
   }
 
-  /**
-   * Refinamiento 2 (APO-009): Resolución de Captions basada en diccionario centralizado (HRU)
-   */
   public getMediaCaption(url: string): string {
     if (url.includes('FINANCIAMIENTO')) return 'Requisitos y Planes de Financiamiento Solar O3 Energy';
     if (url.includes('INSTALACION_PROFESIONAL')) return 'Información de Servicios e Instalación Profesional O3 Energy';
-    return 'Información de O3 Energy'; // Fallback seguro
+    return 'Información de O3 Energy';
   }
 }

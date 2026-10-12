@@ -231,6 +231,7 @@ v2Router.post('/whatsapp-webhook', async (req: Request, res: Response) => {
   let mediaId: string | undefined;
   let mediaType: 'image' | 'document' | 'audio' | 'video' | 'other' | undefined;
   let mediaFilename: string | undefined;
+  let mediaAttachments: Array<{ mediaId: string; mediaType?: 'image' | 'document' | 'audio' | 'video' | 'other'; mediaFilename?: string }> = [];
   const body = req.body;
 
   try {
@@ -240,25 +241,45 @@ v2Router.post('/whatsapp-webhook', async (req: Request, res: Response) => {
       const eventType = val.messages ? 'message' : val.statuses ? 'status' : 'other';
       logger.info('[v2 Webhook] WhatsApp event received', { eventType });
 
-      if (val.messages?.[0]) {
-        const msg = val.messages[0];
-        phone = msg.from;
-        if (msg.type === 'image' || msg.image) {
-          isImage = true;
-          isMedia = true;
-          mediaType = 'image';
-          mediaId = msg.image?.id || msg.id;
-          text = msg.image?.caption || msg.text?.body || '';
-        } else if (msg.type === 'document' || msg.document) {
-          isMedia = true;
-          mediaType = 'document';
-          mediaId = msg.document?.id || msg.id;
-          mediaFilename = msg.document?.filename || 'Recibo.pdf';
-          text = msg.document?.caption || msg.text?.body || '';
-        } else {
-          text = msg.text?.body || msg.button?.text || msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || '';
-        }
+      if (val.messages && val.messages.length > 0) {
+        phone = val.messages[0].from;
         name = val.contacts?.[0]?.profile?.name || 'Cliente WhatsApp';
+
+        const textParts: string[] = [];
+
+        for (const msg of val.messages) {
+          if (msg.type === 'image' || msg.image) {
+            isImage = true;
+            isMedia = true;
+            const attMediaId = msg.image?.id || msg.id;
+            mediaAttachments.push({
+              mediaId: attMediaId,
+              mediaType: 'image',
+              mediaFilename: 'Recibo.jpg',
+            });
+            if (msg.image?.caption) textParts.push(msg.image.caption);
+          } else if (msg.type === 'document' || msg.document) {
+            isMedia = true;
+            const attMediaId = msg.document?.id || msg.id;
+            const attFilename = msg.document?.filename || 'Recibo.pdf';
+            mediaAttachments.push({
+              mediaId: attMediaId,
+              mediaType: 'document',
+              mediaFilename: attFilename,
+            });
+            if (msg.document?.caption) textParts.push(msg.document.caption);
+          } else {
+            const rawBody = msg.text?.body || msg.button?.text || msg.interactive?.button_reply?.title || msg.interactive?.list_reply?.title || '';
+            if (rawBody) textParts.push(rawBody);
+          }
+        }
+
+        text = textParts.join(' ').trim();
+        if (mediaAttachments.length > 0) {
+          mediaId = mediaAttachments[0].mediaId;
+          mediaType = mediaAttachments[0].mediaType;
+          mediaFilename = mediaAttachments[0].mediaFilename;
+        }
       } else {
         if (val.statuses?.[0]) {
           logger.info('[v2 Webhook] Status update', val.statuses[0]);
@@ -302,7 +323,7 @@ v2Router.post('/whatsapp-webhook', async (req: Request, res: Response) => {
       name = body.ProfileName || 'Cliente Twilio';
     }
     // 4. Playground / Simulator payload
-    else if (body.phone && (body.text || body.type === 'image' || body.isImage || body.type === 'document')) {
+    else if (body.phone && (body.text || body.type === 'image' || body.isImage || body.type === 'document' || body.mediaAttachments)) {
       phone = body.phone;
       text = body.text || '';
       if (body.type === 'image' || body.isImage) {
@@ -316,6 +337,10 @@ v2Router.post('/whatsapp-webhook', async (req: Request, res: Response) => {
       }
       mediaId = body.mediaId;
       name = body.name || 'Cliente Simulado';
+      if (body.mediaAttachments && Array.isArray(body.mediaAttachments)) {
+        mediaAttachments = body.mediaAttachments;
+        isMedia = true;
+      }
     }
 
     if (!phone || (!text && !isImage && !isMedia)) {
@@ -333,6 +358,7 @@ v2Router.post('/whatsapp-webhook', async (req: Request, res: Response) => {
       mediaId,
       mediaType,
       mediaFilename,
+      mediaAttachments,
     });
   } catch (err: any) {
     logger.error('[v2 Webhook] Unhandled error', { error: err.message, stack: err.stack });
