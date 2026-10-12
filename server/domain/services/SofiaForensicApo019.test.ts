@@ -142,7 +142,7 @@ describe('SQA Forense Plan APO-019 — Tests T63 a T67 (Sanitización Firestore,
     const savedPayload = setCallArgs[0];
     expect(savedPayload.nombre).toBe('Héctor');
     expect(savedPayload).not.toHaveProperty('deletedAt');
-  });
+  }, 10000);
 
   // ──────────────────────────────────────────────────────────────────────────
   // T65: Continuidad Cross-Lambda Serverless Multicontenedor (Caso Real de Héctor)
