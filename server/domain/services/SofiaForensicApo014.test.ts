@@ -198,7 +198,8 @@ describe('SQA Forense Plan APO-014 — Tests TS-01 a TS-07 (Clasificación CFE, 
       },
     });
 
-    const result = await harness.useCase.execute({
+    // Turno 1: Envío de reverso (se almacena en búfer seguro según Refinamiento 2 de APO-016)
+    await harness.useCase.execute({
       phone,
       tenantId,
       mediaId: 'media-reverso-02',
@@ -209,13 +210,21 @@ describe('SQA Forense Plan APO-014 — Tests TS-01 a TS-07 (Clasificación CFE, 
     const conv = await harness.convRepo.findByPhone(tenantId, phone);
     // 1. NO contamina el estado con montos
     expect(conv.state.monthlyBill).toBeUndefined();
+    expect(conv.state.reversePageReceived).toBe(true);
+
+    // Turno 2: Interacción de seguimiento sin anverso (Reverso huérfano confirmado)
+    const result = await harness.useCase.execute({
+      phone,
+      tenantId,
+      text: '¿Pudiste revisar mi consumo?',
+    });
 
     // 2. Respuesta empática orientada al reverso
     expect(result.reply).toContain('Recibí el historial de consumo de tu recibo CFE');
     expect(result.reply).toContain('¿podrías compartirme también el anverso');
     expect(result.reply).not.toContain('borrosa');
 
-    // 3. Enviado una sola vez por WhatsApp
+    // 3. Enviado por WhatsApp
     expect(harness.sendWhatsApp).toHaveBeenCalledWith(
       phone,
       expect.stringContaining('Recibí el historial de consumo')

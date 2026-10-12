@@ -28,13 +28,49 @@ export class InMemoryConversationRepository implements IConversationRepository {
         status: 'active',
       };
     }
-    return chatsStore[key];
+    return JSON.parse(JSON.stringify(chatsStore[key]));
   }
 
   async save(conversation: Conversation): Promise<void> {
     const key = `${conversation.tenantId}::${conversation.phone}`;
     if (!conversation.status) conversation.status = 'active';
-    chatsStore[key] = conversation;
+    const existing = chatsStore[key];
+    if (existing) {
+      // Reconciliación defensiva de mensajes (Refinamiento 3 - Regla 6 SSD)
+      const msgMap = new Map<string, Message>();
+      (existing.messages || []).forEach((m) => msgMap.set(`${m.timestamp}_${m.text}`, m));
+      (conversation.messages || []).forEach((m) => msgMap.set(`${m.timestamp}_${m.text}`, m));
+      const mergedMessages = Array.from(msgMap.values()).sort((a, b) =>
+        (a.timestamp || '').localeCompare(b.timestamp || '')
+      );
+
+      const mergedCompletedSteps = Array.from(
+        new Set([...(existing.state?.completedSteps || []), ...(conversation.state?.completedSteps || [])])
+      );
+
+      const mergedState: ConversationState = {
+        ...existing.state,
+        ...conversation.state,
+        completedSteps: mergedCompletedSteps,
+        monthlyBill: conversation.state?.monthlyBill || existing.state?.monthlyBill,
+        bimestralBill: conversation.state?.bimestralBill || existing.state?.bimestralBill,
+        reversePageReceived:
+          conversation.state?.reversePageReceived !== undefined
+            ? conversation.state.reversePageReceived
+            : existing.state?.reversePageReceived,
+        lastBillExtractedAt:
+          conversation.state?.lastBillExtractedAt || existing.state?.lastBillExtractedAt,
+      };
+
+      chatsStore[key] = {
+        ...existing,
+        ...conversation,
+        messages: mergedMessages,
+        state: mergedState,
+      };
+    } else {
+      chatsStore[key] = conversation;
+    }
   }
 
   async findAll(tenantId: string): Promise<Conversation[]> {
@@ -138,10 +174,59 @@ export class FirestoreConversationRepository implements IConversationRepository 
     if (!conversation.status) conversation.status = 'active';
     await inMemoryConvFallback.save(conversation);
     try {
-      await this.db
-        .collection(`tenants/${conversation.tenantId}/chats`)
-        .doc(conversation.phone)
-        .set(conversation, { merge: true });
+      if (this.db && typeof this.db.runTransaction === 'function') {
+        const docRef = this.db.collection(`tenants/${conversation.tenantId}/chats`).doc(conversation.phone);
+        await this.db.runTransaction(async (transaction: any) => {
+          const doc = await transaction.get(docRef);
+          if (doc.exists) {
+            const existingData = doc.data() || {};
+            const existingMessages: Message[] = existingData.messages || [];
+            const newMessages = conversation.messages || [];
+
+            const msgMap = new Map<string, Message>();
+            existingMessages.forEach((m) => msgMap.set(`${m.timestamp}_${m.text}`, m));
+            newMessages.forEach((m) => msgMap.set(`${m.timestamp}_${m.text}`, m));
+            const mergedMessages = Array.from(msgMap.values()).sort((a, b) =>
+              (a.timestamp || '').localeCompare(b.timestamp || '')
+            );
+
+            const mergedCompletedSteps = Array.from(
+              new Set([...(existingData.state?.completedSteps || []), ...(conversation.state?.completedSteps || [])])
+            );
+
+            const mergedState = {
+              ...existingData.state,
+              ...conversation.state,
+              completedSteps: mergedCompletedSteps,
+              monthlyBill: conversation.state?.monthlyBill || existingData.state?.monthlyBill,
+              bimestralBill: conversation.state?.bimestralBill || existingData.state?.bimestralBill,
+              reversePageReceived:
+                conversation.state?.reversePageReceived !== undefined
+                  ? conversation.state.reversePageReceived
+                  : existingData.state?.reversePageReceived,
+              lastBillExtractedAt:
+                conversation.state?.lastBillExtractedAt || existingData.state?.lastBillExtractedAt,
+            };
+
+            transaction.set(
+              docRef,
+              {
+                ...conversation,
+                messages: mergedMessages,
+                state: mergedState,
+              },
+              { merge: true }
+            );
+          } else {
+            transaction.set(docRef, conversation, { merge: true });
+          }
+        });
+      } else {
+        await this.db
+          .collection(`tenants/${conversation.tenantId}/chats`)
+          .doc(conversation.phone)
+          .set(conversation, { merge: true });
+      }
     } catch (err: any) {
       logger.warn('[FirestoreConversationRepo] Firestore save failed (using in-memory fallback)', { error: err.message });
     }

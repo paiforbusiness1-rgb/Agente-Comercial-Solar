@@ -312,12 +312,40 @@ var InMemoryConversationRepository = class {
         status: "active"
       };
     }
-    return chatsStore[key];
+    return JSON.parse(JSON.stringify(chatsStore[key]));
   }
   async save(conversation) {
     const key = `${conversation.tenantId}::${conversation.phone}`;
     if (!conversation.status) conversation.status = "active";
-    chatsStore[key] = conversation;
+    const existing = chatsStore[key];
+    if (existing) {
+      const msgMap = /* @__PURE__ */ new Map();
+      (existing.messages || []).forEach((m) => msgMap.set(`${m.timestamp}_${m.text}`, m));
+      (conversation.messages || []).forEach((m) => msgMap.set(`${m.timestamp}_${m.text}`, m));
+      const mergedMessages = Array.from(msgMap.values()).sort(
+        (a, b) => (a.timestamp || "").localeCompare(b.timestamp || "")
+      );
+      const mergedCompletedSteps = Array.from(
+        /* @__PURE__ */ new Set([...existing.state?.completedSteps || [], ...conversation.state?.completedSteps || []])
+      );
+      const mergedState = {
+        ...existing.state,
+        ...conversation.state,
+        completedSteps: mergedCompletedSteps,
+        monthlyBill: conversation.state?.monthlyBill || existing.state?.monthlyBill,
+        bimestralBill: conversation.state?.bimestralBill || existing.state?.bimestralBill,
+        reversePageReceived: conversation.state?.reversePageReceived !== void 0 ? conversation.state.reversePageReceived : existing.state?.reversePageReceived,
+        lastBillExtractedAt: conversation.state?.lastBillExtractedAt || existing.state?.lastBillExtractedAt
+      };
+      chatsStore[key] = {
+        ...existing,
+        ...conversation,
+        messages: mergedMessages,
+        state: mergedState
+      };
+    } else {
+      chatsStore[key] = conversation;
+    }
   }
   async findAll(tenantId) {
     return Object.values(chatsStore).filter((c) => c.tenantId === tenantId && c.status !== "deleted");
@@ -411,7 +439,48 @@ var FirestoreConversationRepository = class {
     if (!conversation.status) conversation.status = "active";
     await inMemoryConvFallback.save(conversation);
     try {
-      await this.db.collection(`tenants/${conversation.tenantId}/chats`).doc(conversation.phone).set(conversation, { merge: true });
+      if (this.db && typeof this.db.runTransaction === "function") {
+        const docRef = this.db.collection(`tenants/${conversation.tenantId}/chats`).doc(conversation.phone);
+        await this.db.runTransaction(async (transaction) => {
+          const doc = await transaction.get(docRef);
+          if (doc.exists) {
+            const existingData = doc.data() || {};
+            const existingMessages = existingData.messages || [];
+            const newMessages = conversation.messages || [];
+            const msgMap = /* @__PURE__ */ new Map();
+            existingMessages.forEach((m) => msgMap.set(`${m.timestamp}_${m.text}`, m));
+            newMessages.forEach((m) => msgMap.set(`${m.timestamp}_${m.text}`, m));
+            const mergedMessages = Array.from(msgMap.values()).sort(
+              (a, b) => (a.timestamp || "").localeCompare(b.timestamp || "")
+            );
+            const mergedCompletedSteps = Array.from(
+              /* @__PURE__ */ new Set([...existingData.state?.completedSteps || [], ...conversation.state?.completedSteps || []])
+            );
+            const mergedState = {
+              ...existingData.state,
+              ...conversation.state,
+              completedSteps: mergedCompletedSteps,
+              monthlyBill: conversation.state?.monthlyBill || existingData.state?.monthlyBill,
+              bimestralBill: conversation.state?.bimestralBill || existingData.state?.bimestralBill,
+              reversePageReceived: conversation.state?.reversePageReceived !== void 0 ? conversation.state.reversePageReceived : existingData.state?.reversePageReceived,
+              lastBillExtractedAt: conversation.state?.lastBillExtractedAt || existingData.state?.lastBillExtractedAt
+            };
+            transaction.set(
+              docRef,
+              {
+                ...conversation,
+                messages: mergedMessages,
+                state: mergedState
+              },
+              { merge: true }
+            );
+          } else {
+            transaction.set(docRef, conversation, { merge: true });
+          }
+        });
+      } else {
+        await this.db.collection(`tenants/${conversation.tenantId}/chats`).doc(conversation.phone).set(conversation, { merge: true });
+      }
     } catch (err) {
       logger.warn("[FirestoreConversationRepo] Firestore save failed (using in-memory fallback)", { error: err.message });
     }
@@ -1117,6 +1186,79 @@ Analiza la imagen o documento adjunto y clasif\xEDcalo estrictamente en formato 
   }
 };
 
+// server/domain/services/BillNormalizerService.ts
+var BillNormalizerService = class {
+  /**
+   * Normalizes bill amount and frequency.
+   * If frequency is omitted, defaults to 'bimestral' (standard CFE residential billing in Mexico).
+   */
+  static normalize(input) {
+    let amount = input.rawAmount;
+    let frequency = this.parseFrequency(input.rawFrequency);
+    if ((!amount || amount <= 0) && input.messageText) {
+      const preParsed = this.preParseUserText(input.messageText);
+      if (preParsed) {
+        amount = preParsed.amount;
+        if (!frequency && preParsed.frequency) {
+          frequency = preParsed.frequency;
+        }
+      }
+    }
+    if (!amount || amount <= 0) {
+      return null;
+    }
+    let isDefaultAssumed = false;
+    if (!frequency) {
+      frequency = "bimestral";
+      isDefaultAssumed = true;
+    }
+    let monthlyBill;
+    let bimestralBill;
+    if (frequency === "bimestral") {
+      bimestralBill = amount;
+      monthlyBill = Math.round(amount / 2);
+    } else {
+      monthlyBill = amount;
+      bimestralBill = Math.round(amount * 2);
+    }
+    const formattedSummary = frequency === "bimestral" ? `$${bimestralBill.toLocaleString("es-MX")} MXN bimestrales ($${monthlyBill.toLocaleString("es-MX")} MXN/mes)` : `$${monthlyBill.toLocaleString("es-MX")} MXN mensuales ($${bimestralBill.toLocaleString("es-MX")} MXN/bimestre)`;
+    return {
+      monthlyBill,
+      bimestralBill,
+      frequency,
+      isDefaultFrequencyAssumed: isDefaultAssumed,
+      formattedSummary
+    };
+  }
+  /**
+   * Pre-parses raw message text to extract numeric amounts and frequency keywords
+   * before LLM invocation for single-pass prompt seeding.
+   */
+  static preParseUserText(text) {
+    if (!text) return null;
+    const lower = text.toLowerCase().trim();
+    const cleanedText = lower.replace(/,/g, "");
+    const amountMatch = cleanedText.match(/(?:pago|monto|recibo|es de|son|\$)?\s*(\d{3,6})\s*(?:pesos|mxn)?/);
+    if (!amountMatch) return null;
+    const amount = parseInt(amountMatch[1], 10);
+    if (isNaN(amount) || amount <= 0) return null;
+    let frequency;
+    if (lower.includes("bimestre") || lower.includes("bimestral") || lower.includes("cada dos meses") || lower.includes("cada 2 meses") || lower.includes("bimensual")) {
+      frequency = "bimestral";
+    } else if (lower.includes("mes") || lower.includes("mensual") || lower.includes("al mes") || lower.includes("cada mes")) {
+      frequency = "mensual";
+    }
+    return { amount, frequency };
+  }
+  static parseFrequency(rawFreq) {
+    if (!rawFreq) return void 0;
+    const lower = rawFreq.toLowerCase();
+    if (lower.includes("bimest")) return "bimestral";
+    if (lower.includes("mens")) return "mensual";
+    return void 0;
+  }
+};
+
 // server/application/usecases/ReceiveMessageUseCase.ts
 var ReceiveMessageUseCase = class {
   constructor(convRepo2, orchestrator, sendWhatsApp, sendWhatsAppMedia2, mediaService, extractorService) {
@@ -1143,10 +1285,11 @@ var ReceiveMessageUseCase = class {
     });
     let extractedData = null;
     let successfulReceiptSource = input.mediaType === "document" ? "pdf" : "image";
+    let reverseDetected = false;
+    let bothPagesAnalyzed = false;
     const rawAttachments = input.mediaAttachments && input.mediaAttachments.length > 0 ? input.mediaAttachments : input.mediaId ? [{ mediaId: input.mediaId, mediaType: input.mediaType, mediaFilename: input.mediaFilename }] : [];
     if (rawAttachments.length > 0) {
       let primarySuccessData = null;
-      let reverseDetected = false;
       let nonCfeDetected = false;
       let unreadableDetected = false;
       let infraError = null;
@@ -1192,20 +1335,54 @@ var ReceiveMessageUseCase = class {
       const conv = await this.convRepo.findByPhone(tenantId, phone);
       if (primarySuccessData) {
         extractedData = primarySuccessData;
+        bothPagesAnalyzed = reverseDetected || Boolean(conv.state?.reversePageReceived);
         const mainLabel = processedLabels[0] || `\u{1F4C4} [Recibo CFE analizado: $${extractedData.montoTotal.toLocaleString("es-MX")} MXN]`;
-        const extraNote = reverseDetected ? " (Anverso y Reverso analizados)" : "";
+        const extraNote = bothPagesAnalyzed ? " (Anverso y Reverso analizados)" : "";
         conv.messages.push({
           sender: "user",
           text: text ? `${mainLabel}${extraNote} \u2014 "${text}"` : `${mainLabel}${extraNote}`,
           timestamp: (/* @__PURE__ */ new Date()).toISOString()
         });
+        conv.state.reversePageReceived = false;
+        conv.state.lastBillExtractedAt = (/* @__PURE__ */ new Date()).toISOString();
         await this.convRepo.save(conv);
       } else {
         let fallbackReply = "";
         let userNote = "";
         if (reverseDetected) {
+          const hasExistingBill = Boolean(conv.state?.monthlyBill || conv.state?.bimestralBill);
+          const isPostQualificationPhase = conv.state?.phase && conv.state.phase !== "GREETING" && conv.state.phase !== "QUALIFICATION";
+          const hasQuoteSent = Boolean(conv.state?.completedSteps?.includes("QUOTE_SENT"));
+          const recentBillExtracted = Boolean(
+            conv.state?.lastBillExtractedAt && Date.now() - new Date(conv.state.lastBillExtractedAt).getTime() < 3e4
+          );
+          if (hasExistingBill || isPostQualificationPhase || hasQuoteSent || recentBillExtracted) {
+            logger.info("[ReceiveMessageUseCase] Reverse page received as supplementary document", { phone });
+            userNote = "\u{1F4C4} [Reverso de recibo CFE complementario: Historial de consumo analizado]";
+            conv.messages.push({ sender: "user", text: userNote, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
+            if (recentBillExtracted) {
+              await this.convRepo.save(conv);
+              return { reply: "", leadGenerated: false };
+            }
+            fallbackReply = "\xA1Muchas gracias! Recib\xED el historial de consumo complementario de tu recibo CFE \u{1F4C4}. Ya contamos con tu propuesta; \xBFtienes alguna duda sobre el sistema o te gustar\xEDa ver opciones de financiamiento?";
+            conv.messages.push({ sender: "bot", text: fallbackReply, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
+            conv.lastMessageAt = (/* @__PURE__ */ new Date()).toISOString();
+            await this.convRepo.save(conv);
+            await this.sendWhatsApp(phone, fallbackReply);
+            return { reply: fallbackReply, leadGenerated: false };
+          }
+          if (!conv.state?.reversePageReceived) {
+            logger.info("[ReceiveMessageUseCase] First reverse page detected without bill. Buffering silently for concurrent anverso.", { phone });
+            conv.state.reversePageReceived = true;
+            conv.state.reversePageReceivedAt = (/* @__PURE__ */ new Date()).toISOString();
+            userNote = "\u{1F4C4} [Reverso de recibo CFE detectado: Historial de consumo]";
+            conv.messages.push({ sender: "user", text: userNote, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
+            await this.convRepo.save(conv);
+            return { reply: "", leadGenerated: false };
+          }
           fallbackReply = "\xA1Excelente! Recib\xED el historial de consumo de tu recibo CFE \u{1F4C4}. Para elaborar tu propuesta de ahorro solar con tu tarifa actual, \xBFpodr\xEDas compartirme tambi\xE9n el anverso (donde aparece el Total a Pagar en pesos) o confirmarme tu monto promedio?";
           userNote = "\u{1F4C4} [Reverso de recibo CFE adjuntado: Historial de consumo]";
+          conv.state.reversePageReceived = false;
         } else if (infraError) {
           fallbackReply = "Recib\xED tu recibo de CFE \u{1F4C4}, pero tuve una peque\xF1a intermitencia t\xE9cnica moment\xE1nea al leer los datos de forma autom\xE1tica. Para no hacerte esperar, \xBFme podr\xEDas confirmar la cantidad exacta que aparece en tu recibo?";
           userNote = `\u26A0\uFE0F [Intermitencia t\xE9cnica al procesar archivo: ${infraError.errorType}]`;
@@ -1243,11 +1420,27 @@ var ReceiveMessageUseCase = class {
       await this.sendWhatsApp(phone, fallbackReply);
       return { reply: fallbackReply, leadGenerated: false };
     }
+    const currentConv = await this.convRepo.findByPhone(tenantId, phone);
+    if (currentConv.state?.reversePageReceived && !currentConv.state.monthlyBill && !extractedData) {
+      const userMentionedBill = BillNormalizerService.preParseUserText(text);
+      if (!userMentionedBill) {
+        const fallbackReply = "\xA1Excelente! Recib\xED el historial de consumo de tu recibo CFE \u{1F4C4}. Para elaborar tu propuesta de ahorro solar con tu tarifa actual, \xBFpodr\xEDas compartirme tambi\xE9n el anverso (donde aparece el Total a Pagar en pesos) o confirmarme tu monto promedio?";
+        currentConv.messages.push({ sender: "user", text, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
+        currentConv.messages.push({ sender: "bot", text: fallbackReply, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
+        currentConv.state.reversePageReceived = false;
+        currentConv.lastMessageAt = (/* @__PURE__ */ new Date()).toISOString();
+        await this.convRepo.save(currentConv);
+        await this.sendWhatsApp(phone, fallbackReply);
+        return { reply: fallbackReply, leadGenerated: false };
+      }
+    }
+    bothPagesAnalyzed = bothPagesAnalyzed || (extractedData ? reverseDetected || Boolean(currentConv.state?.reversePageReceived) : false);
     const extractedBill = extractedData ? {
       amount: extractedData.montoTotal,
       frequency: extractedData.periodo,
       tariff: extractedData.tarifa,
-      receiptSource: successfulReceiptSource
+      receiptSource: successfulReceiptSource,
+      bothPagesAnalyzed
     } : void 0;
     const effectiveMessageText = text.length > 0 ? text : extractedBill ? `Adjunto mi recibo de luz de ${extractedBill.amount} pesos` : "";
     const result = await this.orchestrator.processMessage({
@@ -1730,79 +1923,6 @@ _Este presupuesto es una estimaci\xF3n aproximada basada en tu consumo reportado
         textSummary
       };
     }
-  }
-};
-
-// server/domain/services/BillNormalizerService.ts
-var BillNormalizerService = class {
-  /**
-   * Normalizes bill amount and frequency.
-   * If frequency is omitted, defaults to 'bimestral' (standard CFE residential billing in Mexico).
-   */
-  static normalize(input) {
-    let amount = input.rawAmount;
-    let frequency = this.parseFrequency(input.rawFrequency);
-    if ((!amount || amount <= 0) && input.messageText) {
-      const preParsed = this.preParseUserText(input.messageText);
-      if (preParsed) {
-        amount = preParsed.amount;
-        if (!frequency && preParsed.frequency) {
-          frequency = preParsed.frequency;
-        }
-      }
-    }
-    if (!amount || amount <= 0) {
-      return null;
-    }
-    let isDefaultAssumed = false;
-    if (!frequency) {
-      frequency = "bimestral";
-      isDefaultAssumed = true;
-    }
-    let monthlyBill;
-    let bimestralBill;
-    if (frequency === "bimestral") {
-      bimestralBill = amount;
-      monthlyBill = Math.round(amount / 2);
-    } else {
-      monthlyBill = amount;
-      bimestralBill = Math.round(amount * 2);
-    }
-    const formattedSummary = frequency === "bimestral" ? `$${bimestralBill.toLocaleString("es-MX")} MXN bimestrales ($${monthlyBill.toLocaleString("es-MX")} MXN/mes)` : `$${monthlyBill.toLocaleString("es-MX")} MXN mensuales ($${bimestralBill.toLocaleString("es-MX")} MXN/bimestre)`;
-    return {
-      monthlyBill,
-      bimestralBill,
-      frequency,
-      isDefaultFrequencyAssumed: isDefaultAssumed,
-      formattedSummary
-    };
-  }
-  /**
-   * Pre-parses raw message text to extract numeric amounts and frequency keywords
-   * before LLM invocation for single-pass prompt seeding.
-   */
-  static preParseUserText(text) {
-    if (!text) return null;
-    const lower = text.toLowerCase().trim();
-    const cleanedText = lower.replace(/,/g, "");
-    const amountMatch = cleanedText.match(/(?:pago|monto|recibo|es de|son|\$)?\s*(\d{3,6})\s*(?:pesos|mxn)?/);
-    if (!amountMatch) return null;
-    const amount = parseInt(amountMatch[1], 10);
-    if (isNaN(amount) || amount <= 0) return null;
-    let frequency;
-    if (lower.includes("bimestre") || lower.includes("bimestral") || lower.includes("cada dos meses") || lower.includes("cada 2 meses") || lower.includes("bimensual")) {
-      frequency = "bimestral";
-    } else if (lower.includes("mes") || lower.includes("mensual") || lower.includes("al mes") || lower.includes("cada mes")) {
-      frequency = "mensual";
-    }
-    return { amount, frequency };
-  }
-  static parseFrequency(rawFreq) {
-    if (!rawFreq) return void 0;
-    const lower = rawFreq.toLowerCase();
-    if (lower.includes("bimest")) return "bimestral";
-    if (lower.includes("mens")) return "mensual";
-    return void 0;
   }
 };
 
@@ -2410,6 +2530,16 @@ Mientras me pasas el dato, te comparto informaci\xF3n detallada de nuestro servi
       await this.triggerLeadHandoff(conv, phone, userName || conv.nombre, parsed.handoff_reason || "Solicitud de cliente");
     } else {
       conv.state.phase = this.stepIntToPhase(effectiveNextStep);
+    }
+    if (input.extractedBill?.bothPagesAnalyzed && !/ambas p[áa]ginas/i.test(finalReply)) {
+      if (finalReply.startsWith("\xA1")) {
+        const firstExclamation = finalReply.indexOf("!");
+        finalReply = `${finalReply.slice(0, firstExclamation + 1)} He analizado con \xE9xito ambas p\xE1ginas de tu recibo CFE \u{1F4C4}.${finalReply.slice(firstExclamation + 1)}`;
+      } else {
+        finalReply = `\xA1Excelente! He analizado con \xE9xito ambas p\xE1ginas de tu recibo CFE \u{1F4C4}.
+
+${finalReply}`;
+      }
     }
     conv.messages.push({ sender: "user", text: messageText, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
     conv.messages.push({ sender: "bot", text: finalReply, timestamp: (/* @__PURE__ */ new Date()).toISOString() });

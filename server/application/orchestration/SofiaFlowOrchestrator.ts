@@ -33,6 +33,7 @@ export interface OrchestrationInput {
     frequency?: 'mensual' | 'bimestral';
     tariff?: string;
     receiptSource?: 'pdf' | 'image';
+    bothPagesAnalyzed?: boolean;
   };
 }
 
@@ -411,6 +412,16 @@ export class SofiaFlowOrchestrator {
       await this.triggerLeadHandoff(conv, phone, userName || conv.nombre, parsed.handoff_reason || 'Solicitud de cliente');
     } else {
       conv.state.phase = this.stepIntToPhase(effectiveNextStep);
+    }
+
+    // Reconocimiento U-First cuando se analizaron ambas páginas (Anverso + Reverso)
+    if (input.extractedBill?.bothPagesAnalyzed && !/ambas p[áa]ginas/i.test(finalReply)) {
+      if (finalReply.startsWith('¡')) {
+        const firstExclamation = finalReply.indexOf('!');
+        finalReply = `${finalReply.slice(0, firstExclamation + 1)} He analizado con éxito ambas páginas de tu recibo CFE 📄.${finalReply.slice(firstExclamation + 1)}`;
+      } else {
+        finalReply = `¡Excelente! He analizado con éxito ambas páginas de tu recibo CFE 📄.\n\n${finalReply}`;
+      }
     }
 
     // Append messages to conversation history

@@ -22,6 +22,7 @@ import {
   CfeReceiptData,
   CfeExtractionResult,
 } from '../../domain/services/CfeReceiptExtractorService.js';
+import { BillNormalizerService } from '../../domain/services/BillNormalizerService.js';
 
 export interface MediaAttachmentItem {
   mediaId: string;
@@ -75,6 +76,8 @@ export class ReceiveMessageUseCase {
 
     let extractedData: CfeReceiptData | null = null;
     let successfulReceiptSource: 'pdf' | 'image' = input.mediaType === 'document' ? 'pdf' : 'image';
+    let reverseDetected = false;
+    let bothPagesAnalyzed = false;
 
     // ─── FASE 1: PROCESAMIENTO DE ARCHIVOS MULTIMEDIA (REF. 1: CONSOLIDACIÓN MULTI-ADJUNTO) ───
     const rawAttachments: MediaAttachmentItem[] =
@@ -86,7 +89,6 @@ export class ReceiveMessageUseCase {
 
     if (rawAttachments.length > 0) {
       let primarySuccessData: CfeReceiptData | null = null;
-      let reverseDetected = false;
       let nonCfeDetected = false;
       let unreadableDetected = false;
       let infraError: { errorType: string; message: string } | null = null;
@@ -138,27 +140,74 @@ export class ReceiveMessageUseCase {
 
       const conv = await this.convRepo.findByPhone(tenantId, phone);
 
-      // CASO A: Se extrajo con éxito el Anverso (incluso si venía acompañado de un reverso)
+      // CASO A: Se extrajo con éxito el Anverso (incluso si venía acompañado de un reverso o reverso previo)
       if (primarySuccessData) {
         extractedData = primarySuccessData;
+        bothPagesAnalyzed = reverseDetected || Boolean(conv.state?.reversePageReceived);
         const mainLabel = processedLabels[0] || `📄 [Recibo CFE analizado: $${extractedData.montoTotal.toLocaleString('es-MX')} MXN]`;
-        const extraNote = reverseDetected ? ' (Anverso y Reverso analizados)' : '';
+        const extraNote = bothPagesAnalyzed ? ' (Anverso y Reverso analizados)' : '';
         conv.messages.push({
           sender: 'user',
           text: text ? `${mainLabel}${extraNote} — "${text}"` : `${mainLabel}${extraNote}`,
           timestamp: new Date().toISOString(),
         });
+        conv.state.reversePageReceived = false;
+        conv.state.lastBillExtractedAt = new Date().toISOString();
         await this.convRepo.save(conv);
       }
-      // CASO B: No hubo anverso válido, responder según taxonomía U-First consolidada
+      // CASO B: No hubo anverso válido en esta petición, responder según taxonomía U-First consolidada
       else {
         let fallbackReply = '';
         let userNote = '';
 
         if (reverseDetected) {
+          const hasExistingBill = Boolean(conv.state?.monthlyBill || conv.state?.bimestralBill);
+          const isPostQualificationPhase = conv.state?.phase && conv.state.phase !== 'GREETING' && conv.state.phase !== 'QUALIFICATION';
+          const hasQuoteSent = Boolean(conv.state?.completedSteps?.includes('QUOTE_SENT'));
+          const recentBillExtracted = Boolean(
+            conv.state?.lastBillExtractedAt &&
+            Date.now() - new Date(conv.state.lastBillExtractedAt).getTime() < 30000
+          );
+
+          if (hasExistingBill || isPostQualificationPhase || hasQuoteSent || recentBillExtracted) {
+            // Escenario 1: Reverso Complementario Posterior (T50) o ráfaga multi-webhook reciente (T48)
+            logger.info('[ReceiveMessageUseCase] Reverse page received as supplementary document', { phone });
+            userNote = '📄 [Reverso de recibo CFE complementario: Historial de consumo analizado]';
+            conv.messages.push({ sender: 'user', text: userNote, timestamp: new Date().toISOString() });
+
+            // Si el anverso fue procesado en los últimos 30 segundos, suprimir respuesta duplicada para no interrumpir (T48)
+            if (recentBillExtracted) {
+              await this.convRepo.save(conv);
+              return { reply: '', leadGenerated: false };
+            }
+
+            // Si fue enviado tiempo después, confirmar recepción contextualmente sin pedir el anverso de nuevo (T50)
+            fallbackReply =
+              '¡Muchas gracias! Recibí el historial de consumo complementario de tu recibo CFE 📄. Ya contamos con tu propuesta; ¿tienes alguna duda sobre el sistema o te gustaría ver opciones de financiamiento?';
+            conv.messages.push({ sender: 'bot', text: fallbackReply, timestamp: new Date().toISOString() });
+            conv.lastMessageAt = new Date().toISOString();
+            await this.convRepo.save(conv);
+            await this.sendWhatsApp(phone, fallbackReply);
+            return { reply: fallbackReply, leadGenerated: false };
+          }
+
+          // Escenario 2: Reverso Temprano / Sin Anverso Aún (Refinamiento 2 - Caso Borde "Reverso Primero" T49)
+          if (!conv.state?.reversePageReceived) {
+            logger.info('[ReceiveMessageUseCase] First reverse page detected without bill. Buffering silently for concurrent anverso.', { phone });
+            conv.state.reversePageReceived = true;
+            conv.state.reversePageReceivedAt = new Date().toISOString();
+            userNote = '📄 [Reverso de recibo CFE detectado: Historial de consumo]';
+            conv.messages.push({ sender: 'user', text: userNote, timestamp: new Date().toISOString() });
+            await this.convRepo.save(conv);
+            // Silencio intencional: NO se llama a sendWhatsApp para evitar contradicción si el anverso viene en camino
+            return { reply: '', leadGenerated: false };
+          }
+
+          // Escenario 3: Segundo reverso consecutivo sin anverso
           fallbackReply =
             '¡Excelente! Recibí el historial de consumo de tu recibo CFE 📄. Para elaborar tu propuesta de ahorro solar con tu tarifa actual, ¿podrías compartirme también el anverso (donde aparece el Total a Pagar en pesos) o confirmarme tu monto promedio?';
           userNote = '📄 [Reverso de recibo CFE adjuntado: Historial de consumo]';
+          conv.state.reversePageReceived = false;
         } else if (infraError) {
           fallbackReply =
             'Recibí tu recibo de CFE 📄, pero tuve una pequeña intermitencia técnica momentánea al leer los datos de forma automática. Para no hacerte esperar, ¿me podrías confirmar la cantidad exacta que aparece en tu recibo?';
@@ -206,13 +255,32 @@ export class ReceiveMessageUseCase {
       return { reply: fallbackReply, leadGenerated: false };
     }
 
+    // ─── FASE 1.5: INTERACCIÓN POSTERIOR CON REVERSO HUÉRFANO PENDIENTE (T51) ───
+    const currentConv = await this.convRepo.findByPhone(tenantId, phone);
+    if (currentConv.state?.reversePageReceived && !currentConv.state.monthlyBill && !extractedData) {
+      const userMentionedBill = BillNormalizerService.preParseUserText(text);
+      if (!userMentionedBill) {
+        const fallbackReply =
+          '¡Excelente! Recibí el historial de consumo de tu recibo CFE 📄. Para elaborar tu propuesta de ahorro solar con tu tarifa actual, ¿podrías compartirme también el anverso (donde aparece el Total a Pagar en pesos) o confirmarme tu monto promedio?';
+        currentConv.messages.push({ sender: 'user', text, timestamp: new Date().toISOString() });
+        currentConv.messages.push({ sender: 'bot', text: fallbackReply, timestamp: new Date().toISOString() });
+        currentConv.state.reversePageReceived = false;
+        currentConv.lastMessageAt = new Date().toISOString();
+        await this.convRepo.save(currentConv);
+        await this.sendWhatsApp(phone, fallbackReply);
+        return { reply: fallbackReply, leadGenerated: false };
+      }
+    }
+
     // ─── FASE 2: ORQUESTACIÓN CONVERSACIONAL (PAYLOADS HÍBRIDOS & TEXTO DIRECTO) ───
+    bothPagesAnalyzed = bothPagesAnalyzed || (extractedData ? (reverseDetected || Boolean(currentConv.state?.reversePageReceived)) : false);
     const extractedBill = extractedData
       ? {
           amount: extractedData.montoTotal,
           frequency: extractedData.periodo,
           tariff: extractedData.tarifa,
           receiptSource: successfulReceiptSource,
+          bothPagesAnalyzed,
         }
       : undefined;
 

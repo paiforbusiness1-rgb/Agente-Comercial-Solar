@@ -41,6 +41,10 @@ export interface ConversationState {
     instalacionProfessional?: boolean;
     financiamiento?: boolean;
   };
+  // APO-016: Multi-Webhook Concurrency & State Guard Flags
+  reversePageReceived?: boolean;
+  reversePageReceivedAt?: string;
+  lastBillExtractedAt?: string;
 }
 
 export interface Message {
