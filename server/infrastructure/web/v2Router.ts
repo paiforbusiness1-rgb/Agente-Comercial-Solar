@@ -5,7 +5,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { AppConfig } from '../../shared/config/AppConfig.js';
 import { logger } from '../../shared/logger/ConsoleLogger.js';
-import { buildReceiveMessageUseCase, convRepo, leadRepo, getAgentRepo } from './container.js';
+import { buildReceiveMessageUseCase, convRepo, leadRepo, getAgentRepo, getIdempotencyService } from './container.js';
 import { AuthService, JwtPayload } from '../services/AuthService.js';
 import { GoogleAuthService } from '../services/GoogleAuthService.js';
 import { RateLimiterService } from '../services/RateLimiterService.js';
@@ -243,11 +243,24 @@ v2Router.post('/whatsapp-webhook', async (req: Request, res: Response) => {
       logger.info('[v2 Webhook] WhatsApp event received', { eventType });
 
       if (val.messages && val.messages.length > 0) {
-        phone = val.messages[0].from;
+        const firstMsg = val.messages[0];
+        const wamid = firstMsg.id;
+        phone = firstMsg.from;
         name = val.contacts?.[0]?.profile?.name || 'Cliente WhatsApp';
 
-        if (val.messages[0].timestamp) {
-          const rawEpoch = parseInt(val.messages[0].timestamp, 10);
+        // ─── CORTAFUEGOS DE IDEMPOTENCIA WAMID (APO-022 / SSD / EXIGENCIA 1) ───
+        if (wamid) {
+          const tenantId = (req.query.tenantId as string) || AppConfig.tenant.defaultId;
+          const idempotency = getIdempotencyService();
+          const isFresh = await idempotency.checkAndLock(tenantId, wamid);
+          if (!isFresh) {
+            logger.warn('[v2 Webhook] Duplicate WAMID detected from Meta Cloud API retry, ignoring', { wamid, phone });
+            return res.status(200).json({ status: 'duplicate_ignored', wamid });
+          }
+        }
+
+        if (firstMsg.timestamp) {
+          const rawEpoch = parseInt(firstMsg.timestamp, 10);
           if (!isNaN(rawEpoch) && rawEpoch > 0) {
             inboundTimestamp = new Date(rawEpoch * 1000).toISOString();
           }
@@ -322,6 +335,16 @@ v2Router.post('/whatsapp-webhook', async (req: Request, res: Response) => {
     // 3. Twilio payload
     else if (body.From && (body.Body || body.NumMedia)) {
       phone = body.From.replace('whatsapp:', '');
+      const messageSid = body.MessageSid || body.SmsMessageSid;
+      if (messageSid) {
+        const tenantId = (req.query.tenantId as string) || AppConfig.tenant.defaultId;
+        const idempotency = getIdempotencyService();
+        const isFresh = await idempotency.checkAndLock(tenantId, messageSid);
+        if (!isFresh) {
+          logger.warn('[v2 Webhook] Duplicate Twilio MessageSid detected, ignoring', { messageSid, phone });
+          return res.status(200).json({ status: 'duplicate_ignored', messageSid });
+        }
+      }
       text = body.Body || '';
       if (body.NumMedia && parseInt(body.NumMedia, 10) > 0) {
         isImage = true;
@@ -333,6 +356,16 @@ v2Router.post('/whatsapp-webhook', async (req: Request, res: Response) => {
     // 4. Playground / Simulator payload
     else if (body.phone && (body.text || body.type === 'image' || body.isImage || body.type === 'document' || body.mediaAttachments)) {
       phone = body.phone;
+      const simMsgId = body.messageId || body.id;
+      if (simMsgId) {
+        const tenantId = (req.query.tenantId as string) || AppConfig.tenant.defaultId;
+        const idempotency = getIdempotencyService();
+        const isFresh = await idempotency.checkAndLock(tenantId, simMsgId);
+        if (!isFresh) {
+          logger.warn('[v2 Webhook] Duplicate Simulator MessageId detected, ignoring', { simMsgId, phone });
+          return res.status(200).json({ status: 'duplicate_ignored', simMsgId });
+        }
+      }
       text = body.text || '';
       if (body.type === 'image' || body.isImage) {
         isImage = true;

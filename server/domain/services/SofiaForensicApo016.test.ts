@@ -369,19 +369,18 @@ describe('SQA Forense Plan APO-016 — Tests T48 a T52 (Concurrencia Multi-Webho
       mediaFilename: 'historial_reverso.jpg',
     });
 
-    // 1. Sofía agradece contextualmente
-    expect(result.reply).toContain('Recibí el historial de consumo complementario');
-    expect(result.reply).toContain('Ya contamos con tu propuesta');
+    // 1. Silencio Activo: Sofía NO interrumpe con mensajes redundantes durante TECHNICAL_SURVEY
+    expect(result.reply).toBe('');
+    expect(harness.sendWhatsApp).not.toHaveBeenCalled();
 
-    // 2. NO solicita el anverso ni el monto de nuevo
-    expect(result.reply).not.toContain('¿podrías compartirme también el anverso');
-    expect(result.reply).not.toContain('confirmarme tu monto');
+    // 2. NO solicita el anverso ni el monto de nuevo y el estado permanece intacto
+    const conv = await harness.convRepo.findByPhone(tenantId, phone);
+    expect(conv.state.monthlyBill).toBe(74114);
+    expect(conv.state.phase).toBe('TECHNICAL_SURVEY');
 
-    // 3. Enviado por WhatsApp
-    expect(harness.sendWhatsApp).toHaveBeenCalledWith(
-      phone,
-      expect.stringContaining('Recibí el historial de consumo complementario')
-    );
+    // 3. Se registra la nota técnica de auditoría en los mensajes del usuario
+    const userMessages = conv.messages.filter((m) => m.sender === 'user');
+    expect(userMessages.some((m) => m.text.includes('Reverso de recibo CFE complementario'))).toBe(true);
   });
 
   // ─── T51: REVERSO HUÉRFANO AUTÉNTICO ────────────────────────────────────────

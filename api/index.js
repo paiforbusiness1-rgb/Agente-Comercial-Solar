@@ -1611,28 +1611,39 @@ var ReceiveMessageUseCase = class {
       } else {
         let fallbackReply = "";
         let userNote = "";
-        if (reverseDetected) {
-          const hasExistingBill = Boolean(conv.state?.monthlyBill || conv.state?.bimestralBill);
-          const isPostQualificationPhase = conv.state?.phase && conv.state.phase !== "GREETING" && conv.state.phase !== "QUALIFICATION";
-          const hasQuoteSent = Boolean(conv.state?.completedSteps?.includes("QUOTE_SENT"));
-          const recentBillExtracted = Boolean(
-            conv.state?.lastBillExtractedAt && Date.now() - new Date(conv.state.lastBillExtractedAt).getTime() < 3e4
-          );
-          if (hasExistingBill || isPostQualificationPhase || hasQuoteSent || recentBillExtracted) {
-            logger.info("[ReceiveMessageUseCase] Reverse page received as supplementary document", { phone });
+        const hasExistingBill = Boolean(
+          conv.state?.monthlyBill && conv.state.monthlyBill > 0 || conv.state?.bimestralBill && conv.state.bimestralBill > 0
+        );
+        if (hasExistingBill) {
+          if (reverseDetected) {
+            logger.info("[ReceiveMessageUseCase] Reverse page received as supplementary document with bill already extracted", { phone });
             userNote = "\u{1F4C4} [Reverso de recibo CFE complementario: Historial de consumo analizado]";
-            conv.messages.push({ sender: "user", text: userNote, timestamp: inboundTimestamp });
-            if (recentBillExtracted) {
-              await this.convRepo.save(conv);
-              return { reply: "", leadGenerated: false };
-            }
-            fallbackReply = "\xA1Muchas gracias! Recib\xED el historial de consumo complementario de tu recibo CFE \u{1F4C4}. Ya contamos con tu propuesta; \xBFtienes alguna duda sobre el sistema o te gustar\xEDa ver opciones de financiamiento?";
-            conv.messages.push({ sender: "bot", text: fallbackReply, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
-            conv.lastMessageAt = (/* @__PURE__ */ new Date()).toISOString();
-            await this.convRepo.save(conv);
-            await this.sendWhatsApp(phone, fallbackReply);
-            return { reply: fallbackReply, leadGenerated: false };
+          } else if (infraError) {
+            logger.warn("[ReceiveMessageUseCase] Secondary media infraError but bill already extracted. Silently ignoring to preserve UX.", { phone, errorType: infraError.errorType });
+            userNote = `\u26A0\uFE0F [Intermitencia t\xE9cnica al procesar archivo secundario: ${infraError.errorType}]`;
+          } else if (sizeExceeded) {
+            logger.warn("[ReceiveMessageUseCase] Secondary media sizeExceeded but bill already extracted. Silently ignoring to preserve UX.", { phone });
+            userNote = `\u{1F4CE} [Archivo secundario excede 5MB: ${rawAttachments[0]?.mediaFilename || "Archivo"}]`;
+          } else if (fetchFailed) {
+            logger.warn("[ReceiveMessageUseCase] Secondary media fetchFailed but bill already extracted. Silently ignoring to preserve UX.", { phone });
+            userNote = `\u{1F4CE} [Error al descargar archivo secundario: ${rawAttachments[0]?.mediaFilename || "Archivo"}]`;
+          } else if (nonCfeDetected) {
+            logger.warn("[ReceiveMessageUseCase] Secondary media nonCfeDetected but bill already extracted. Silently ignoring to preserve UX.", { phone });
+            userNote = `\u{1F4CE} [Archivo secundario no corresponde a CFE: ${rawAttachments[0]?.mediaFilename || "Documento"}]`;
+          } else {
+            logger.warn("[ReceiveMessageUseCase] Secondary media unreadable but bill already extracted. Silently ignoring to preserve UX.", { phone });
+            userNote = `\u{1F4CE} [Archivo secundario ilegible: ${rawAttachments[0]?.mediaFilename || "Archivo"}]`;
           }
+          conv.messages.push({
+            sender: "user",
+            text: userNote,
+            timestamp: inboundTimestamp
+          });
+          conv.lastMessageAt = (/* @__PURE__ */ new Date()).toISOString();
+          await this.convRepo.save(conv);
+          return { reply: "", leadGenerated: false };
+        }
+        if (reverseDetected) {
           if (!conv.state?.reversePageReceived) {
             logger.info("[ReceiveMessageUseCase] First reverse page detected without bill. Buffering silently for concurrent anverso.", { phone });
             conv.state.reversePageReceived = true;
@@ -3049,6 +3060,85 @@ ${defaultCta}`;
 import { getApps as getApps2, initializeApp, cert } from "firebase-admin/app";
 import { getFirestore, initializeFirestore } from "firebase-admin/firestore";
 import nodemailer2 from "nodemailer";
+
+// server/infrastructure/services/WamidIdempotencyService.ts
+var WamidIdempotencyService = class {
+  constructor(db2) {
+    this.db = db2;
+    this.inMemoryFallback = /* @__PURE__ */ new Set();
+  }
+  /**
+   * Intenta adquirir un bloqueo atómico sobre el WAMID.
+   * @param tenantId ID del tenant
+   * @param wamid ID único del mensaje de WhatsApp (ej. wamid.HBgLM...)
+   * @param ttlSeconds Tiempo de vida del bloqueo en segundos (default 600 = 10 min)
+   * @returns `true` si es la primera vez que se procesa el WAMID (adquisición exitosa).
+   *          `false` si el WAMID ya fue registrado o está siendo procesado (duplicado detectado).
+   */
+  async checkAndLock(tenantId, wamid, ttlSeconds = 600) {
+    if (!wamid) {
+      return true;
+    }
+    const now = Date.now();
+    const expiresAtIso = new Date(now + ttlSeconds * 1e3).toISOString();
+    if (this.db && typeof this.db.collection === "function") {
+      try {
+        const docRef = this.db.collection(`tenants/${tenantId}/wamid_processed`).doc(wamid);
+        if (typeof this.db.runTransaction === "function") {
+          return await this.db.runTransaction(async (transaction) => {
+            const snap = await transaction.get(docRef);
+            if (snap.exists) {
+              const data = snap.data();
+              if (data?.expiresAt && new Date(data.expiresAt).getTime() > now) {
+                return false;
+              }
+            }
+            transaction.set(docRef, {
+              wamid,
+              tenantId,
+              processedAt: new Date(now).toISOString(),
+              expiresAt: expiresAtIso
+            });
+            return true;
+          });
+        }
+        const doc = await docRef.get();
+        if (doc.exists) {
+          const data = doc.data();
+          if (data?.expiresAt && new Date(data.expiresAt).getTime() > now) {
+            return false;
+          }
+        }
+        await docRef.set({
+          wamid,
+          tenantId,
+          processedAt: new Date(now).toISOString(),
+          expiresAt: expiresAtIso
+        });
+        return true;
+      } catch (err) {
+        logger.warn("[WamidIdempotencyService] Error en Firestore, usando fallback en memoria", { error: err.message, wamid });
+      }
+    }
+    const memKey = `${tenantId}::${wamid}`;
+    if (this.inMemoryFallback.has(memKey)) {
+      return false;
+    }
+    this.inMemoryFallback.add(memKey);
+    if (typeof setTimeout === "function") {
+      setTimeout(() => this.inMemoryFallback.delete(memKey), ttlSeconds * 1e3);
+    }
+    return true;
+  }
+  async isProcessed(tenantId, wamid) {
+    return !await this.checkAndLock(tenantId, wamid);
+  }
+  resetInMemoryCache() {
+    this.inMemoryFallback.clear();
+  }
+};
+
+// server/infrastructure/web/container.ts
 var quoteEngine = new SolarQuoteEngine();
 var llmProvider = new ResilientLLMProvider();
 var emailService = {
@@ -3198,6 +3288,7 @@ var _db = null;
 var _convRepo;
 var _leadRepo;
 var _agentRepo;
+var _idempotencyService;
 function initRepositories(db2) {
   _db = db2;
   if (db2) {
@@ -3205,11 +3296,13 @@ function initRepositories(db2) {
     _convRepo = new FirestoreConversationRepository(db2);
     _leadRepo = new FirestoreLeadRepository(db2);
     _agentRepo = new AgentRepository(db2);
+    _idempotencyService = new WamidIdempotencyService(db2);
   } else {
     logger.warn("[DI] initRepositories: Firestore not available \u2014 using InMemory repositories");
     _convRepo = new InMemoryConversationRepository();
     _leadRepo = new InMemoryLeadRepository();
     _agentRepo = new AgentRepository(null);
+    _idempotencyService = new WamidIdempotencyService(null);
   }
 }
 function getConvRepo() {
@@ -3255,6 +3348,22 @@ var leadRepo = new Proxy({}, {
 var agentRepo = new Proxy({}, {
   get(_target, prop) {
     const instance = getAgentRepo();
+    const value = instance[prop];
+    return typeof value === "function" ? value.bind(instance) : value;
+  }
+});
+function getIdempotencyService() {
+  if (!_idempotencyService) {
+    if (!_db) {
+      getRepos();
+    }
+    _idempotencyService = new WamidIdempotencyService(_db || null);
+  }
+  return _idempotencyService;
+}
+var idempotencyService = new Proxy({}, {
+  get(_target, prop) {
+    const instance = getIdempotencyService();
     const value = instance[prop];
     return typeof value === "function" ? value.bind(instance) : value;
   }
@@ -3828,10 +3937,21 @@ v2Router.post("/whatsapp-webhook", async (req, res) => {
       const eventType = val.messages ? "message" : val.statuses ? "status" : "other";
       logger.info("[v2 Webhook] WhatsApp event received", { eventType });
       if (val.messages && val.messages.length > 0) {
-        phone = val.messages[0].from;
+        const firstMsg = val.messages[0];
+        const wamid = firstMsg.id;
+        phone = firstMsg.from;
         name = val.contacts?.[0]?.profile?.name || "Cliente WhatsApp";
-        if (val.messages[0].timestamp) {
-          const rawEpoch = parseInt(val.messages[0].timestamp, 10);
+        if (wamid) {
+          const tenantId = req.query.tenantId || AppConfig.tenant.defaultId;
+          const idempotency = getIdempotencyService();
+          const isFresh = await idempotency.checkAndLock(tenantId, wamid);
+          if (!isFresh) {
+            logger.warn("[v2 Webhook] Duplicate WAMID detected from Meta Cloud API retry, ignoring", { wamid, phone });
+            return res.status(200).json({ status: "duplicate_ignored", wamid });
+          }
+        }
+        if (firstMsg.timestamp) {
+          const rawEpoch = parseInt(firstMsg.timestamp, 10);
           if (!isNaN(rawEpoch) && rawEpoch > 0) {
             inboundTimestamp = new Date(rawEpoch * 1e3).toISOString();
           }
@@ -3899,6 +4019,16 @@ v2Router.post("/whatsapp-webhook", async (req, res) => {
       }
     } else if (body.From && (body.Body || body.NumMedia)) {
       phone = body.From.replace("whatsapp:", "");
+      const messageSid = body.MessageSid || body.SmsMessageSid;
+      if (messageSid) {
+        const tenantId = req.query.tenantId || AppConfig.tenant.defaultId;
+        const idempotency = getIdempotencyService();
+        const isFresh = await idempotency.checkAndLock(tenantId, messageSid);
+        if (!isFresh) {
+          logger.warn("[v2 Webhook] Duplicate Twilio MessageSid detected, ignoring", { messageSid, phone });
+          return res.status(200).json({ status: "duplicate_ignored", messageSid });
+        }
+      }
       text = body.Body || "";
       if (body.NumMedia && parseInt(body.NumMedia, 10) > 0) {
         isImage = true;
@@ -3908,6 +4038,16 @@ v2Router.post("/whatsapp-webhook", async (req, res) => {
       name = body.ProfileName || "Cliente Twilio";
     } else if (body.phone && (body.text || body.type === "image" || body.isImage || body.type === "document" || body.mediaAttachments)) {
       phone = body.phone;
+      const simMsgId = body.messageId || body.id;
+      if (simMsgId) {
+        const tenantId = req.query.tenantId || AppConfig.tenant.defaultId;
+        const idempotency = getIdempotencyService();
+        const isFresh = await idempotency.checkAndLock(tenantId, simMsgId);
+        if (!isFresh) {
+          logger.warn("[v2 Webhook] Duplicate Simulator MessageId detected, ignoring", { simMsgId, phone });
+          return res.status(200).json({ status: "duplicate_ignored", simMsgId });
+        }
+      }
       text = body.text || "";
       if (body.type === "image" || body.isImage) {
         isImage = true;

@@ -18,6 +18,7 @@ import { logger } from '../../shared/logger/ConsoleLogger.js';
 import { getApps, initializeApp, cert } from 'firebase-admin/app';
 import { getFirestore, initializeFirestore } from 'firebase-admin/firestore';
 import nodemailer from 'nodemailer';
+import { WamidIdempotencyService } from '../services/WamidIdempotencyService.js';
 
 // ─── Infrastructure ────────────────────────────────────────────────────────
 const quoteEngine = new SolarQuoteEngine();
@@ -183,6 +184,7 @@ let _db: any = null;
 let _convRepo: IConversationRepository | undefined;
 let _leadRepo: ILeadRepository | undefined;
 let _agentRepo: AgentRepository | undefined;
+let _idempotencyService: WamidIdempotencyService | undefined;
 
 export function initRepositories(db: any | null) {
   _db = db;
@@ -191,11 +193,13 @@ export function initRepositories(db: any | null) {
     _convRepo = new FirestoreConversationRepository(db);
     _leadRepo = new FirestoreLeadRepository(db);
     _agentRepo = new AgentRepository(db);
+    _idempotencyService = new WamidIdempotencyService(db);
   } else {
     logger.warn('[DI] initRepositories: Firestore not available — using InMemory repositories');
     _convRepo = new InMemoryConversationRepository();
     _leadRepo = new InMemoryLeadRepository();
     _agentRepo = new AgentRepository(null);
+    _idempotencyService = new WamidIdempotencyService(null);
   }
 }
 
@@ -248,6 +252,24 @@ export const leadRepo: ILeadRepository = new Proxy({} as ILeadRepository, {
 export const agentRepo: AgentRepository = new Proxy({} as AgentRepository, {
   get(_target, prop) {
     const instance = getAgentRepo();
+    const value = (instance as any)[prop];
+    return typeof value === 'function' ? value.bind(instance) : value;
+  },
+});
+
+export function getIdempotencyService(): WamidIdempotencyService {
+  if (!_idempotencyService) {
+    if (!_db) {
+      getRepos();
+    }
+    _idempotencyService = new WamidIdempotencyService(_db || null);
+  }
+  return _idempotencyService;
+}
+
+export const idempotencyService: WamidIdempotencyService = new Proxy({} as WamidIdempotencyService, {
+  get(_target, prop) {
+    const instance = getIdempotencyService();
     const value = (instance as any)[prop];
     return typeof value === 'function' ? value.bind(instance) : value;
   },

@@ -162,38 +162,50 @@ export class ReceiveMessageUseCase {
         let fallbackReply = '';
         let userNote = '';
 
-        if (reverseDetected) {
-          const hasExistingBill = Boolean(conv.state?.monthlyBill || conv.state?.bimestralBill);
-          const isPostQualificationPhase = conv.state?.phase && conv.state.phase !== 'GREETING' && conv.state.phase !== 'QUALIFICATION';
-          const hasQuoteSent = Boolean(conv.state?.completedSteps?.includes('QUOTE_SENT'));
-          const recentBillExtracted = Boolean(
-            conv.state?.lastBillExtractedAt &&
-            Date.now() - new Date(conv.state.lastBillExtractedAt).getTime() < 30000
-          );
+        const hasExistingBill = Boolean(
+          (conv.state?.monthlyBill && conv.state.monthlyBill > 0) ||
+          (conv.state?.bimestralBill && conv.state.bimestralBill > 0)
+        );
 
-          if (hasExistingBill || isPostQualificationPhase || hasQuoteSent || recentBillExtracted) {
-            // Escenario 1: Reverso Complementario Posterior (T50) o ráfaga multi-webhook reciente (T48)
-            logger.info('[ReceiveMessageUseCase] Reverse page received as supplementary document', { phone });
+        // ─── REGLA ESTRICTA STATE-AWARE (APO-022 / EXIGENCIAS 2 & 3 DE AUDITORÍA) ───────
+        // Si el monto ya fue extraído previamente, NUNCA romper la UX pidiendo el monto de nuevo,
+        // ni enviar disculpas ni textos descontextualizados por archivos secundarios/reversos.
+        if (hasExistingBill) {
+          if (reverseDetected) {
+            logger.info('[ReceiveMessageUseCase] Reverse page received as supplementary document with bill already extracted', { phone });
             userNote = '📄 [Reverso de recibo CFE complementario: Historial de consumo analizado]';
-            conv.messages.push({ sender: 'user', text: userNote, timestamp: inboundTimestamp });
-
-            // Si el anverso fue procesado en los últimos 30 segundos, suprimir respuesta duplicada para no interrumpir (T48)
-            if (recentBillExtracted) {
-              await this.convRepo.save(conv);
-              return { reply: '', leadGenerated: false };
-            }
-
-            // Si fue enviado tiempo después, confirmar recepción contextualmente sin pedir el anverso de nuevo (T50)
-            fallbackReply =
-              '¡Muchas gracias! Recibí el historial de consumo complementario de tu recibo CFE 📄. Ya contamos con tu propuesta; ¿tienes alguna duda sobre el sistema o te gustaría ver opciones de financiamiento?';
-            conv.messages.push({ sender: 'bot', text: fallbackReply, timestamp: new Date().toISOString() });
-            conv.lastMessageAt = new Date().toISOString();
-            await this.convRepo.save(conv);
-            await this.sendWhatsApp(phone, fallbackReply);
-            return { reply: fallbackReply, leadGenerated: false };
+          } else if (infraError) {
+            logger.warn('[ReceiveMessageUseCase] Secondary media infraError but bill already extracted. Silently ignoring to preserve UX.', { phone, errorType: infraError.errorType });
+            userNote = `⚠️ [Intermitencia técnica al procesar archivo secundario: ${infraError.errorType}]`;
+          } else if (sizeExceeded) {
+            logger.warn('[ReceiveMessageUseCase] Secondary media sizeExceeded but bill already extracted. Silently ignoring to preserve UX.', { phone });
+            userNote = `📎 [Archivo secundario excede 5MB: ${rawAttachments[0]?.mediaFilename || 'Archivo'}]`;
+          } else if (fetchFailed) {
+            logger.warn('[ReceiveMessageUseCase] Secondary media fetchFailed but bill already extracted. Silently ignoring to preserve UX.', { phone });
+            userNote = `📎 [Error al descargar archivo secundario: ${rawAttachments[0]?.mediaFilename || 'Archivo'}]`;
+          } else if (nonCfeDetected) {
+            logger.warn('[ReceiveMessageUseCase] Secondary media nonCfeDetected but bill already extracted. Silently ignoring to preserve UX.', { phone });
+            userNote = `📎 [Archivo secundario no corresponde a CFE: ${rawAttachments[0]?.mediaFilename || 'Documento'}]`;
+          } else {
+            logger.warn('[ReceiveMessageUseCase] Secondary media unreadable but bill already extracted. Silently ignoring to preserve UX.', { phone });
+            userNote = `📎 [Archivo secundario ilegible: ${rawAttachments[0]?.mediaFilename || 'Archivo'}]`;
           }
 
-          // Escenario 2: Reverso Temprano / Sin Anverso Aún (Refinamiento 2 - Caso Borde "Reverso Primero" T49)
+          conv.messages.push({
+            sender: 'user',
+            text: userNote,
+            timestamp: inboundTimestamp,
+          });
+          conv.lastMessageAt = new Date().toISOString();
+          await this.convRepo.save(conv);
+
+          // Silencio activo: Cero mensajes de interrupción, cero WhatsApp spam, preserva flujo activo
+          return { reply: '', leadGenerated: false };
+        }
+
+        // Si NO hay monto extraído aún (hasExistingBill === false):
+        if (reverseDetected) {
+          // Escenario 1: Reverso Temprano / Sin Anverso Aún (Refinamiento 2 - Caso Borde "Reverso Primero" T49)
           if (!conv.state?.reversePageReceived) {
             logger.info('[ReceiveMessageUseCase] First reverse page detected without bill. Buffering silently for concurrent anverso.', { phone });
             conv.state.reversePageReceived = true;
@@ -205,7 +217,7 @@ export class ReceiveMessageUseCase {
             return { reply: '', leadGenerated: false };
           }
 
-          // Escenario 3: Segundo reverso consecutivo sin anverso
+          // Escenario 2: Segundo reverso consecutivo sin anverso
           fallbackReply =
             '¡Excelente! Recibí el historial de consumo de tu recibo CFE 📄. Para elaborar tu propuesta de ahorro solar con tu tarifa actual, ¿podrías compartirme también el anverso (donde aparece el Total a Pagar en pesos) o confirmarme tu monto promedio?';
           userNote = '📄 [Reverso de recibo CFE adjuntado: Historial de consumo]';
