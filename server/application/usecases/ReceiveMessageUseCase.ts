@@ -428,6 +428,8 @@ export class ReceiveMessageUseCase {
         if (explicitAffirmative) {
           currentConv.state.quoteConsentGiven = true;
           currentConv.state.completedSteps.push('QUOTE_SENT');
+          currentConv.state.phase = 'FINANCING'; // 👈 Actualización proactiva de fase para esperar financiamiento/visita (APO-026)
+          currentConv.state.financingConsentRequested = false;
           const quote = this.quoteEngine.calculate(monthlyBillMxn, (currentConv.state as any).extraLoads);
           const displayName = clientName ? `, ${clientName}` : '';
           fallbackReply = `¡Con mucho gusto${displayName}! Aquí tienes tu propuesta personalizada:\n\n☀️ *Sistema Propuesto:* ${quote.systemDescription}\n💰 *Inversión Estimada:* ${quote.costFormatted}\n📉 *Ahorro Estimado:* ${quote.monthlySavingsFormatted} al mes (${quote.annualSavingsFormatted} al año)\n⏳ *Retorno de Inversión (ROI):* ~${quote.roiYears} años\n\n${quote.disclaimer}\n\n¿Te gustaría conocer nuestras opciones de financiamiento con pagos mensuales accesibles o prefieres agendar una visita técnica gratuita a tu domicilio? 📅`;
@@ -488,22 +490,56 @@ export class ReceiveMessageUseCase {
           }
         }
       }
-      // CASO 6: FINANCING - Solicitud de opciones de financiamiento desde QUOTATION
-      else if (currentPhase === 'QUOTATION' && (
-        effectiveMessageText.toLowerCase().includes('financiamiento') ||
-        effectiveMessageText.toLowerCase().includes('opciones') ||
-        effectiveMessageText.toLowerCase().includes('meses') ||
-        effectiveMessageText.toLowerCase().includes('plazos')
-      )) {
-        currentConv.state.phase = 'FINANCING';
-        currentConv.state.financingConsentRequested = true;
-        currentConv.state.financingConsentGiven = false;
-        const displayName = clientName ? `, ${clientName}` : '';
-        const tierCost = this.quoteEngine.calculate(monthlyBillMxn).estimatedCost;
-        const m12 = Math.round(tierCost / 12);
-        const m24 = Math.round(tierCost / 24);
-        const m36 = Math.round(tierCost / 36);
-        fallbackReply = `¡Perfecto${displayName}! 😊 Aquí tienes un resumen de nuestras opciones de financiamiento para la inversión de $${tierCost.toLocaleString('es-MX')} MXN:\n\n🔹 *12 meses* – Pago mensual aproximado de $${m12.toLocaleString('es-MX')} MXN.\n🔹 *24 meses* – Pago mensual aproximado de $${m24.toLocaleString('es-MX')} MXN.\n🔹 *36 meses* – Pago mensual aproximado de $${m36.toLocaleString('es-MX')} MXN.\n\nTodas las opciones incluyen la garantía de los paneles, la instalación profesional y el trámite de interconexión con CFE.\n\n¿Te gustaría que te envíe el brochure oficial con los requisitos y pasos para tramitar el financiamiento? 📄`;
+      // CASO 6: RESPUESTA A OFERTA DE FINANCIAMIENTO / VISITA TRAS COTIZACIÓN (APO-026)
+      else if (
+        (currentPhase === 'QUOTATION' && currentConv.state.completedSteps.includes('QUOTE_SENT')) ||
+        (currentPhase === 'FINANCING' && currentConv.state.financingConsentRequested !== true)
+      ) {
+        const normalizedMsg = effectiveMessageText.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+        const wantsFinancing = [
+          'si', 'sí', 'por favor', 'adelante', 'claro', 'ok', 'bueno', 'dale',
+          'financiamiento', 'opciones', 'meses', 'plazos', 'me interesa', 'conocer',
+          'ver financiamiento', 'conocer opciones', 'planes', 'credito', 'crédito'
+        ].some(k => {
+          const normK = k.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+          return normalizedMsg === normK || normalizedMsg.startsWith(normK) || normalizedMsg.includes(normK);
+        });
+        const wantsVisit = [
+          'visita', 'agendar', 'asesor', 'humano', 'contacto', 'domicilio', 'gratuita', 'ingeniero', 'tecnico', 'técnico'
+        ].some(k => normalizedMsg.includes(k.normalize('NFD').replace(/[\u0300-\u036f]/g, '')));
+        const wantsCash = [
+          'contado', 'directo', 'no', 'ninguno', 'prefiero contado', 'de contado', 'sin financiamiento'
+        ].some(k => normalizedMsg.includes(k.normalize('NFD').replace(/[\u0300-\u036f]/g, '')));
+
+        if (wantsVisit) {
+          // Traspaso proactivo a asesor para visita técnica gratuita
+          currentConv.state.phase = 'HUMAN_HANDOFF';
+          currentConv.state.advisorHandoffProposed = true;
+          currentConv.botDisabled = true;
+          const displayName = clientName ? ` ${clientName}` : '';
+          fallbackReply = `¡Excelente${displayName}! Con mucho gusto. En un momento uno de nuestros asesores especializados de O3 Energy se pondrá en contacto contigo directamente por aquí para coordinar la fecha y hora de tu visita técnica gratuita. ☀️\n\n¡Que tengas un excelente día!`;
+          
+          await this.orchestrator.triggerLeadHandoff(currentConv, phone, currentConv.nombre || 'Cliente', 'Solicitud de visita técnica gratuita');
+          leadGenerated = true;
+        } else if (wantsFinancing) {
+          currentConv.state.phase = 'FINANCING';
+          currentConv.state.financingConsentRequested = true;
+          currentConv.state.financingConsentGiven = false;
+          const displayName = clientName ? `, ${clientName}` : '';
+          const tierCost = this.quoteEngine.calculate(monthlyBillMxn).estimatedCost;
+          const m12 = Math.round(tierCost / 12);
+          const m24 = Math.round(tierCost / 24);
+          const m36 = Math.round(tierCost / 36);
+          fallbackReply = `¡Perfecto${displayName}! 😊 Aquí tienes un resumen de nuestras opciones de financiamiento para la inversión de $${tierCost.toLocaleString('es-MX')} MXN:\n\n🔹 *12 meses* – Pago mensual aproximado de $${m12.toLocaleString('es-MX')} MXN.\n🔹 *24 meses* – Pago mensual aproximado de $${m24.toLocaleString('es-MX')} MXN.\n🔹 *36 meses* – Pago mensual aproximado de $${m36.toLocaleString('es-MX')} MXN.\n\nTodas las opciones incluyen la garantía de los paneles, la instalación profesional y el trámite de interconexión con CFE.\n\n¿Te gustaría que te envíe el brochure oficial con los requisitos y pasos para tramitar el financiamiento? 📄`;
+        } else if (wantsCash) {
+          currentConv.state.financingConsentGiven = false;
+          currentConv.state.phase = 'CLOSING';
+          const displayName = clientName ? `, ${clientName}` : '';
+          fallbackReply = `¡Totalmente de acuerdo${displayName}! Contamos con excelentes facilidades para liquidación de contado. Para validar tu instalación y dimensionamiento en sitio, ¿te gustaría que coordinemos la visita técnica gratuita de nuestros ingenieros a tu domicilio? 📅`;
+        } else {
+          const displayName = clientName ? `, ${clientName}` : '';
+          fallbackReply = `Para avanzar${displayName}, ¿prefieres que te comparta nuestras opciones de financiamiento en mensualidades o coordinamos tu visita técnica gratuita a domicilio? 📅`;
+        }
       }
       // CASO 7: CLOSING - Confirmación de visita técnica o traspaso a asesor
       else if ((currentPhase === 'CLOSING' || currentPhase === 'FINANCING') && (
