@@ -107,7 +107,7 @@ async function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
 }
 var GroqProvider = class {
-  constructor(timeoutMs = 4e3, customFetch) {
+  constructor(timeoutMs = 7e3, customFetch) {
     this.timeoutMs = timeoutMs;
     this.customFetch = customFetch;
     this.endpoint = "https://api.groq.com/openai/v1/chat/completions";
@@ -1819,6 +1819,80 @@ ${quote.disclaimer}
         } else {
           fallbackReply = `${greeting} Recib\xED tu mensaje. Estamos experimentando una peque\xF1a intermitencia t\xE9cnica en este momento. Tu informaci\xF3n ya qued\xF3 registrada y en unos minutos uno de nuestros asesores continuar\xE1 atendi\xE9ndote por aqu\xED.`;
         }
+      } else if (currentPhase === "FINANCING" && currentConv.state.financingConsentRequested === true) {
+        const affirmativeKeywords = ["si", "s\xED", "por favor", "adelante", "m\xE1ndamelo", "mandamelo", "pasamelo", "p\xE1samelo", "claro", "ok", "bueno", "dale", "enviamelo", "env\xEDamelo"];
+        const normalizedMsg = effectiveMessageText.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+        const isAffirmative = affirmativeKeywords.some((keyword) => {
+          const normKey = keyword.normalize("NFD").replace(/[\u0300-\u036f]/g, "");
+          return normalizedMsg === normKey || normalizedMsg.startsWith(normKey) || normalizedMsg.includes(normKey);
+        });
+        if (isAffirmative) {
+          const alreadySent = Boolean(currentConv.state.mediaSentFlags?.financiamiento);
+          currentConv.state.financingConsentGiven = true;
+          currentConv.state.mediaSentFlags = currentConv.state.mediaSentFlags || {};
+          currentConv.state.mediaSentFlags.financiamiento = true;
+          currentConv.state.phase = "CLOSING";
+          const displayName = clientName ? `, ${clientName}` : "";
+          fallbackReply = `\xA1Excelente${displayName}! \u{1F60A} Te comparto el brochure oficial con todos los requisitos y facilidades de financiamiento. \u{1F4C4}\u2600\uFE0F
+
+Para validar tu instalaci\xF3n y dimensionamiento en sitio, \xBFte gustar\xEDa que coordinemos la visita t\xE9cnica gratuita de nuestros ingenieros a tu domicilio? \u{1F4C5}`;
+          currentConv.messages.push({ sender: "bot", text: fallbackReply, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
+          currentConv.messages.push({
+            sender: "bot",
+            text: "\u{1F4C4} [Brochure Enviado]: Planes y requisitos de financiamiento solar",
+            timestamp: (/* @__PURE__ */ new Date()).toISOString()
+          });
+          currentConv.lastMessageAt = (/* @__PURE__ */ new Date()).toISOString();
+          await this.convRepo.save(currentConv);
+          await this.sendWhatsApp(phone, fallbackReply);
+          if (!alreadySent) {
+            try {
+              await new Promise((resolve) => setTimeout(resolve, 1200));
+            } catch {
+            }
+            const fallbackMediaUrl = `${AppConfig.mediaBaseUrl}/FINANCIAMIENTO.jpeg`;
+            await this.sendWhatsAppMedia(phone, fallbackMediaUrl, "Requisitos y Planes de Financiamiento Solar O3 Energy");
+          }
+          return { reply: fallbackReply, leadGenerated: false };
+        } else {
+          const isCash = ["contado", "directo", "no", "ninguno", "prefiero contado"].some((k) => normalizedMsg.includes(k));
+          if (isCash) {
+            currentConv.state.financingConsentGiven = false;
+            currentConv.state.phase = "CLOSING";
+            const displayName = clientName ? `, ${clientName}` : "";
+            fallbackReply = `\xA1Totalmente de acuerdo${displayName}! Contamos con excelentes facilidades para liquidaci\xF3n de contado. Para validar tu instalaci\xF3n y dimensionamiento en sitio, \xBFte gustar\xEDa que coordinemos la visita t\xE9cnica gratuita de nuestros ingenieros a tu domicilio? \u{1F4C5}`;
+          } else {
+            fallbackReply = `${greeting} Recib\xED tu mensaje. Estamos experimentando una peque\xF1a intermitencia t\xE9cnica en este momento. Tu informaci\xF3n ya qued\xF3 registrada y en unos minutos uno de nuestros asesores continuar\xE1 atendi\xE9ndote por aqu\xED.`;
+          }
+        }
+      } else if (currentPhase === "QUOTATION" && (effectiveMessageText.toLowerCase().includes("financiamiento") || effectiveMessageText.toLowerCase().includes("opciones") || effectiveMessageText.toLowerCase().includes("meses") || effectiveMessageText.toLowerCase().includes("plazos"))) {
+        currentConv.state.phase = "FINANCING";
+        currentConv.state.financingConsentRequested = true;
+        currentConv.state.financingConsentGiven = false;
+        const displayName = clientName ? `, ${clientName}` : "";
+        const tierCost = this.quoteEngine.calculate(monthlyBillMxn).estimatedCost;
+        const m12 = Math.round(tierCost / 12);
+        const m24 = Math.round(tierCost / 24);
+        const m36 = Math.round(tierCost / 36);
+        fallbackReply = `\xA1Perfecto${displayName}! \u{1F60A} Aqu\xED tienes un resumen de nuestras opciones de financiamiento para la inversi\xF3n de $${tierCost.toLocaleString("es-MX")} MXN:
+
+\u{1F539} *12 meses* \u2013 Pago mensual aproximado de $${m12.toLocaleString("es-MX")} MXN.
+\u{1F539} *24 meses* \u2013 Pago mensual aproximado de $${m24.toLocaleString("es-MX")} MXN.
+\u{1F539} *36 meses* \u2013 Pago mensual aproximado de $${m36.toLocaleString("es-MX")} MXN.
+
+Todas las opciones incluyen la garant\xEDa de los paneles, la instalaci\xF3n profesional y el tr\xE1mite de interconexi\xF3n con CFE.
+
+\xBFTe gustar\xEDa que te env\xEDe el brochure oficial con los requisitos y pasos para tramitar el financiamiento? \u{1F4C4}`;
+      } else if ((currentPhase === "CLOSING" || currentPhase === "FINANCING") && (effectiveMessageText.toLowerCase().includes("visita") || effectiveMessageText.toLowerCase().includes("agendar") || effectiveMessageText.toLowerCase().includes("asesor") || effectiveMessageText.toLowerCase().includes("humano") || effectiveMessageText.toLowerCase().includes("contacto") || currentPhase === "CLOSING" && ["si", "s\xED", "adelante", "por favor", "claro", "agendemos", "coordinemos", "agendar visita"].some((k) => effectiveMessageText.toLowerCase().trim().startsWith(k)))) {
+        currentConv.state.phase = "HUMAN_HANDOFF";
+        currentConv.state.advisorHandoffProposed = true;
+        currentConv.botDisabled = true;
+        const displayName = clientName ? ` ${clientName}` : "";
+        fallbackReply = `\xA1Excelente${displayName}! Con mucho gusto. En un momento uno de nuestros asesores especializados de O3 Energy se pondr\xE1 en contacto contigo directamente por aqu\xED para coordinar la fecha y hora de tu visita t\xE9cnica gratuita. \u2600\uFE0F
+
+\xA1Que tengas un excelente d\xEDa!`;
+        await this.orchestrator.triggerLeadHandoff(currentConv, phone, currentConv.nombre || "Cliente", "Solicitud de visita t\xE9cnica gratuita");
+        leadGenerated = true;
       } else {
         fallbackReply = `${greeting} Recib\xED tu mensaje. Estamos experimentando una peque\xF1a intermitencia t\xE9cnica en este momento. Tu informaci\xF3n ya qued\xF3 registrada y en unos minutos uno de nuestros asesores continuar\xE1 atendi\xE9ndote por aqu\xED.`;
       }

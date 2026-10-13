@@ -15,22 +15,27 @@ async function checkHectorChat() {
     initializeApp({ credential: cert(serviceAccount) });
   }
   const db = getFirestore();
-  
   const phone = '5214777241148';
-  console.log('Buscando conversacion para:', phone);
-  
-  const doc = await db.collection('conversations').doc(`o3energy_mexico_${phone}`).get();
+  const tenantId = 'o3energy_mexico';
+
+  console.log(`Buscando chat para ${phone} en tenants/${tenantId}/chats...`);
+  const doc = await db.collection(`tenants/${tenantId}/chats`).doc(phone).get();
   if (doc.exists) {
     const data = doc.data() as any;
-    console.log('Conversacion encontrada!');
-    console.log('State / Step:', data.state || data.currentStep);
-    console.log('Total messages:', data.messages?.length);
-    console.log('\nUltimos 8 mensajes:');
-    data.messages?.slice(-8).forEach((m: any) => {
-      console.log(`[${m.sender}] (${m.timestamp}): ${m.text}`);
+    console.log('✅ Chat encontrado!');
+    console.log('Nombre:', data.nombre);
+    console.log('Phase:', data.state?.phase);
+    console.log('CompletedSteps:', data.state?.completedSteps);
+    console.log('FinancingConsentRequested:', data.state?.financingConsentRequested);
+    console.log('FinancingConsentGiven:', data.state?.financingConsentGiven);
+    console.log('MediaSentFlags:', data.state?.mediaSentFlags);
+    console.log('BotDisabled:', data.botDisabled);
+    console.log('\nÚltimos 10 mensajes:');
+    data.messages?.slice(-10).forEach((m: any, i: number) => {
+      console.log(` ${i + 1}. [${m.sender}] (${m.timestamp}): ${m.text.substring(0, 100)}...`);
     });
   } else {
-    console.log('No encontrada en conversations');
+    console.log('❌ No encontrado en chats');
   }
 }
 

@@ -527,7 +527,7 @@ export class SofiaFlowOrchestrator {
     }
   }
 
-  private async triggerLeadHandoff(conv: any, phone: string, name: string, reason: string): Promise<void> {
+  public async triggerLeadHandoff(conv: any, phone: string, name: string, reason: string): Promise<void> {
     try {
       const lead: Lead = {
         id: phone,

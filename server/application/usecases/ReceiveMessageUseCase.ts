@@ -434,6 +434,94 @@ export class ReceiveMessageUseCase {
         } else {
           fallbackReply = `${greeting} Recibí tu mensaje. Estamos experimentando una pequeña intermitencia técnica en este momento. Tu información ya quedó registrada y en unos minutos uno de nuestros asesores continuará atendiéndote por aquí.`;
         }
+      }
+      // CASO 5: FINANCING - Confirmación de brochure
+      else if (currentPhase === 'FINANCING' && currentConv.state.financingConsentRequested === true) {
+        const affirmativeKeywords = ['si', 'sí', 'por favor', 'adelante', 'mándamelo', 'mandamelo', 'pasamelo', 'pásamelo', 'claro', 'ok', 'bueno', 'dale', 'enviamelo', 'envíamelo'];
+        const normalizedMsg = effectiveMessageText.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+        const isAffirmative = affirmativeKeywords.some(keyword => {
+          const normKey = keyword.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+          return normalizedMsg === normKey || normalizedMsg.startsWith(normKey) || normalizedMsg.includes(normKey);
+        });
+
+        if (isAffirmative) {
+          // Idempotencia: Verificar si el brochure ya fue enviado previamente
+          const alreadySent = Boolean(currentConv.state.mediaSentFlags?.financiamiento);
+          currentConv.state.financingConsentGiven = true;
+          currentConv.state.mediaSentFlags = currentConv.state.mediaSentFlags || {};
+          currentConv.state.mediaSentFlags.financiamiento = true;
+          currentConv.state.phase = 'CLOSING';
+
+          const displayName = clientName ? `, ${clientName}` : '';
+          fallbackReply = `¡Excelente${displayName}! 😊 Te comparto el brochure oficial con todos los requisitos y facilidades de financiamiento. 📄☀️\n\nPara validar tu instalación y dimensionamiento en sitio, ¿te gustaría que coordinemos la visita técnica gratuita de nuestros ingenieros a tu domicilio? 📅`;
+
+          currentConv.messages.push({ sender: 'bot', text: fallbackReply, timestamp: new Date().toISOString() });
+          currentConv.messages.push({
+            sender: 'bot',
+            text: '📄 [Brochure Enviado]: Planes y requisitos de financiamiento solar',
+            timestamp: new Date().toISOString(),
+          });
+          currentConv.lastMessageAt = new Date().toISOString();
+          await this.convRepo.save(currentConv);
+          await this.sendWhatsApp(phone, fallbackReply);
+
+          if (!alreadySent) {
+            // Cadencia humanizada de 1.2s antes del brochure
+            try {
+              await new Promise(resolve => setTimeout(resolve, 1200));
+            } catch {}
+            const fallbackMediaUrl = `${AppConfig.mediaBaseUrl}/FINANCIAMIENTO.jpeg`;
+            await this.sendWhatsAppMedia(phone, fallbackMediaUrl, 'Requisitos y Planes de Financiamiento Solar O3 Energy');
+          }
+
+          return { reply: fallbackReply, leadGenerated: false };
+        } else {
+          // Si no es afirmativo, verificar si rechaza o prefiere de contado
+          const isCash = ['contado', 'directo', 'no', 'ninguno', 'prefiero contado'].some(k => normalizedMsg.includes(k));
+          if (isCash) {
+            currentConv.state.financingConsentGiven = false;
+            currentConv.state.phase = 'CLOSING';
+            const displayName = clientName ? `, ${clientName}` : '';
+            fallbackReply = `¡Totalmente de acuerdo${displayName}! Contamos con excelentes facilidades para liquidación de contado. Para validar tu instalación y dimensionamiento en sitio, ¿te gustaría que coordinemos la visita técnica gratuita de nuestros ingenieros a tu domicilio? 📅`;
+          } else {
+            fallbackReply = `${greeting} Recibí tu mensaje. Estamos experimentando una pequeña intermitencia técnica en este momento. Tu información ya quedó registrada y en unos minutos uno de nuestros asesores continuará atendiéndote por aquí.`;
+          }
+        }
+      }
+      // CASO 6: FINANCING - Solicitud de opciones de financiamiento desde QUOTATION
+      else if (currentPhase === 'QUOTATION' && (
+        effectiveMessageText.toLowerCase().includes('financiamiento') ||
+        effectiveMessageText.toLowerCase().includes('opciones') ||
+        effectiveMessageText.toLowerCase().includes('meses') ||
+        effectiveMessageText.toLowerCase().includes('plazos')
+      )) {
+        currentConv.state.phase = 'FINANCING';
+        currentConv.state.financingConsentRequested = true;
+        currentConv.state.financingConsentGiven = false;
+        const displayName = clientName ? `, ${clientName}` : '';
+        const tierCost = this.quoteEngine.calculate(monthlyBillMxn).estimatedCost;
+        const m12 = Math.round(tierCost / 12);
+        const m24 = Math.round(tierCost / 24);
+        const m36 = Math.round(tierCost / 36);
+        fallbackReply = `¡Perfecto${displayName}! 😊 Aquí tienes un resumen de nuestras opciones de financiamiento para la inversión de $${tierCost.toLocaleString('es-MX')} MXN:\n\n🔹 *12 meses* – Pago mensual aproximado de $${m12.toLocaleString('es-MX')} MXN.\n🔹 *24 meses* – Pago mensual aproximado de $${m24.toLocaleString('es-MX')} MXN.\n🔹 *36 meses* – Pago mensual aproximado de $${m36.toLocaleString('es-MX')} MXN.\n\nTodas las opciones incluyen la garantía de los paneles, la instalación profesional y el trámite de interconexión con CFE.\n\n¿Te gustaría que te envíe el brochure oficial con los requisitos y pasos para tramitar el financiamiento? 📄`;
+      }
+      // CASO 7: CLOSING - Confirmación de visita técnica o traspaso a asesor
+      else if ((currentPhase === 'CLOSING' || currentPhase === 'FINANCING') && (
+        effectiveMessageText.toLowerCase().includes('visita') ||
+        effectiveMessageText.toLowerCase().includes('agendar') ||
+        effectiveMessageText.toLowerCase().includes('asesor') ||
+        effectiveMessageText.toLowerCase().includes('humano') ||
+        effectiveMessageText.toLowerCase().includes('contacto') ||
+        (currentPhase === 'CLOSING' && ['si', 'sí', 'adelante', 'por favor', 'claro', 'agendemos', 'coordinemos', 'agendar visita'].some(k => effectiveMessageText.toLowerCase().trim().startsWith(k)))
+      )) {
+        currentConv.state.phase = 'HUMAN_HANDOFF';
+        currentConv.state.advisorHandoffProposed = true;
+        currentConv.botDisabled = true;
+        const displayName = clientName ? ` ${clientName}` : '';
+        fallbackReply = `¡Excelente${displayName}! Con mucho gusto. En un momento uno de nuestros asesores especializados de O3 Energy se pondrá en contacto contigo directamente por aquí para coordinar la fecha y hora de tu visita técnica gratuita. ☀️\n\n¡Que tengas un excelente día!`;
+        
+        await this.orchestrator.triggerLeadHandoff(currentConv, phone, currentConv.nombre || 'Cliente', 'Solicitud de visita técnica gratuita');
+        leadGenerated = true;
       } else {
         // Fallback Secundario: Solo si NO hay datos suficientes para continuar deterministamente
         fallbackReply = `${greeting} Recibí tu mensaje. Estamos experimentando una pequeña intermitencia técnica en este momento. Tu información ya quedó registrada y en unos minutos uno de nuestros asesores continuará atendiéndote por aquí.`;

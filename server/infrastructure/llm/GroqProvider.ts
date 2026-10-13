@@ -15,7 +15,7 @@ export class GroqProvider implements ILLMProvider {
   private readonly endpoint = 'https://api.groq.com/openai/v1/chat/completions';
 
   constructor(
-    private readonly timeoutMs: number = 4000,
+    private readonly timeoutMs: number = 7000,
     private readonly customFetch?: typeof fetch
   ) {}
 
