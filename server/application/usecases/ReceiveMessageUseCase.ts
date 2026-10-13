@@ -455,7 +455,7 @@ export class ReceiveMessageUseCase {
           currentConv.state.phase = 'CLOSING';
 
           const displayName = clientName ? `, ${clientName}` : '';
-          fallbackReply = `¡Excelente${displayName}! 😊 Te comparto el brochure oficial con todos los requisitos y facilidades de financiamiento. 📄☀️\n\nPara validar tu instalación y dimensionamiento en sitio, ¿te gustaría que coordinemos la visita técnica gratuita de nuestros ingenieros a tu domicilio? 📅`;
+          fallbackReply = `¡Excelente${displayName}! 😊 Te comparto el brochure oficial con todos los requisitos y facilidades de financiamiento. 📄☀️\n\n¿Te gustaría que te contacte uno de nuestros especialistas para agendar una cita o visita técnica gratuita de nuestros ingenieros? 📅`;
 
           currentConv.messages.push({ sender: 'bot', text: fallbackReply, timestamp: new Date().toISOString() });
           currentConv.messages.push({
@@ -484,7 +484,7 @@ export class ReceiveMessageUseCase {
             currentConv.state.financingConsentGiven = false;
             currentConv.state.phase = 'CLOSING';
             const displayName = clientName ? `, ${clientName}` : '';
-            fallbackReply = `¡Totalmente de acuerdo${displayName}! Contamos con excelentes facilidades para liquidación de contado. Para validar tu instalación y dimensionamiento en sitio, ¿te gustaría que coordinemos la visita técnica gratuita de nuestros ingenieros a tu domicilio? 📅`;
+            fallbackReply = `¡Totalmente de acuerdo${displayName}! Contamos con excelentes facilidades para liquidación de contado. ¿Te gustaría que te contacte uno de nuestros especialistas para agendar una cita o coordinar tu visita técnica gratuita? 📅`;
           } else {
             fallbackReply = `${greeting} Recibí tu mensaje. Estamos experimentando una pequeña intermitencia técnica en este momento. Tu información ya quedó registrada y en unos minutos uno de nuestros asesores continuará atendiéndote por aquí.`;
           }
@@ -512,14 +512,14 @@ export class ReceiveMessageUseCase {
         ].some(k => normalizedMsg.includes(k.normalize('NFD').replace(/[\u0300-\u036f]/g, '')));
 
         if (wantsVisit) {
-          // Traspaso proactivo a asesor para visita técnica gratuita
+          // Traspaso proactivo a especialista para agendar cita
           currentConv.state.phase = 'HUMAN_HANDOFF';
           currentConv.state.advisorHandoffProposed = true;
           currentConv.botDisabled = true;
           const displayName = clientName ? ` ${clientName}` : '';
-          fallbackReply = `¡Excelente${displayName}! Con mucho gusto. En un momento uno de nuestros asesores especializados de O3 Energy se pondrá en contacto contigo directamente por aquí para coordinar la fecha y hora de tu visita técnica gratuita. ☀️\n\n¡Que tengas un excelente día!`;
+          fallbackReply = `¡Excelente${displayName}! Con mucho gusto. En un momento uno de nuestros asesores especializados de O3 Energy se pondrá en contacto contigo a través de este número para agendar tu cita y coordinar tu visita técnica gratuita. ☀️\n\n¡Que tengas un excelente día!`;
           
-          await this.orchestrator.triggerLeadHandoff(currentConv, phone, currentConv.nombre || 'Cliente', 'Solicitud de visita técnica gratuita');
+          await this.orchestrator.triggerLeadHandoff(currentConv, phone, currentConv.nombre || 'Cliente', 'Solicitud de especialista para agendar cita');
           leadGenerated = true;
         } else if (wantsFinancing) {
           currentConv.state.phase = 'FINANCING';
@@ -535,28 +535,30 @@ export class ReceiveMessageUseCase {
           currentConv.state.financingConsentGiven = false;
           currentConv.state.phase = 'CLOSING';
           const displayName = clientName ? `, ${clientName}` : '';
-          fallbackReply = `¡Totalmente de acuerdo${displayName}! Contamos con excelentes facilidades para liquidación de contado. Para validar tu instalación y dimensionamiento en sitio, ¿te gustaría que coordinemos la visita técnica gratuita de nuestros ingenieros a tu domicilio? 📅`;
+          fallbackReply = `¡Totalmente de acuerdo${displayName}! Contamos con excelentes facilidades para liquidación de contado. ¿Te gustaría que te contacte uno de nuestros especialistas para agendar una cita o coordinar tu visita técnica gratuita? 📅`;
         } else {
           const displayName = clientName ? `, ${clientName}` : '';
-          fallbackReply = `Para avanzar${displayName}, ¿prefieres que te comparta nuestras opciones de financiamiento en mensualidades o coordinamos tu visita técnica gratuita a domicilio? 📅`;
+          fallbackReply = `Para avanzar${displayName}, ¿prefieres que te comparta nuestras opciones de financiamiento en mensualidades o te gustaría que te contacte uno de nuestros especialistas para agendar una cita? 📅`;
         }
       }
-      // CASO 7: CLOSING - Confirmación de visita técnica o traspaso a asesor
+      // CASO 7: CLOSING / FINANCING - Confirmación de cita o contacto con especialista
       else if ((currentPhase === 'CLOSING' || currentPhase === 'FINANCING') && (
         effectiveMessageText.toLowerCase().includes('visita') ||
         effectiveMessageText.toLowerCase().includes('agendar') ||
+        effectiveMessageText.toLowerCase().includes('cita') ||
         effectiveMessageText.toLowerCase().includes('asesor') ||
+        effectiveMessageText.toLowerCase().includes('especialista') ||
         effectiveMessageText.toLowerCase().includes('humano') ||
         effectiveMessageText.toLowerCase().includes('contacto') ||
-        (currentPhase === 'CLOSING' && ['si', 'sí', 'adelante', 'por favor', 'claro', 'agendemos', 'coordinemos', 'agendar visita'].some(k => effectiveMessageText.toLowerCase().trim().startsWith(k)))
+        ['si', 'sí', 'adelante', 'por favor', 'claro', 'agendemos', 'coordinemos', 'me parece bien', 'ok', 'dale', 'agendar cita', 'agendar visita'].some(k => effectiveMessageText.toLowerCase().trim().startsWith(k))
       )) {
         currentConv.state.phase = 'HUMAN_HANDOFF';
         currentConv.state.advisorHandoffProposed = true;
         currentConv.botDisabled = true;
         const displayName = clientName ? ` ${clientName}` : '';
-        fallbackReply = `¡Excelente${displayName}! Con mucho gusto. En un momento uno de nuestros asesores especializados de O3 Energy se pondrá en contacto contigo directamente por aquí para coordinar la fecha y hora de tu visita técnica gratuita. ☀️\n\n¡Que tengas un excelente día!`;
+        fallbackReply = `¡Excelente${displayName}! Con mucho gusto. En un momento uno de nuestros asesores especializados de O3 Energy se pondrá en contacto contigo a través de este número para agendar tu cita y coordinar tu visita técnica gratuita. ☀️\n\n¡Que tengas un excelente día!`;
         
-        await this.orchestrator.triggerLeadHandoff(currentConv, phone, currentConv.nombre || 'Cliente', 'Solicitud de visita técnica gratuita');
+        await this.orchestrator.triggerLeadHandoff(currentConv, phone, currentConv.nombre || 'Cliente', 'Solicitud de especialista para agendar cita');
         leadGenerated = true;
       }
       // CASO 8: GREETING o QUALIFICATION (Blindaje Universal Pasos 1 y 2 - APO-025)

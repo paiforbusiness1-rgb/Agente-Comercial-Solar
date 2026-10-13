@@ -42,9 +42,9 @@ export function useNotifications() {
 
   const triggerBrowserNotification = useCallback((lead: QualifiedLead, onNotificationClick: () => void) => {
     if ('Notification' in window && Notification.permission === 'granted') {
-      const title = `🔥 Lead Calificado: ${lead.nombre || 'Cliente Nuevo'}`;
+      const title = `🚨 NUEVO LEAD CALIFICADO: ${lead.nombre || 'Cliente Nuevo'}`;
       const options = {
-        body: `Recibo: ${lead.montoRecibo || 'Sin monto'} | Sistema: ${lead.sistemaEstimado || 'Sin sistema'}`,
+        body: `En espera de contacto para agendar cita. Recibo: ${lead.montoRecibo || 'Sin monto'} | Sistema: ${lead.sistemaEstimado || 'Sin sistema'}`,
         icon: '/favicon.ico',
         tag: lead.id,
         requireInteraction: true

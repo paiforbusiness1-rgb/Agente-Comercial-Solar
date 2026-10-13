@@ -22,6 +22,17 @@ export interface ProspectData {
   conversationSummary?: string;
 }
 
+export function normalizeWhatsAppPhone(phone: string): string {
+  let clean = (phone || '').replace(/\D/g, '');
+  if (clean.length === 10) {
+    clean = `52${clean}`;
+  }
+  if (clean.startsWith('521') && clean.length === 13) {
+    clean = `52${clean.slice(3)}`;
+  }
+  return clean;
+}
+
 export class AgentNotificationService {
   constructor(private agentRepo: AgentRepository) {}
 
@@ -139,37 +150,44 @@ export class AgentNotificationService {
     }
   }
 
-  // ─── WhatsApp HSM Template (Meta-compliant) ────────────────────────────────
+  // ─── WhatsApp HSM Template (Meta-compliant) + Enriched Text Fallback ───────
 
   private async notifyWhatsApp(agent: Agent, prospect: ProspectData): Promise<boolean> {
     const { accessToken, phoneNumberId, waAgentTemplateName } = AppConfig.meta;
 
-    if (!accessToken || !phoneNumberId) {
-      logger.info('[AgentNotification WA SIM] Would send WA template to agent', { phone: agent.whatsappPhone });
-      return true;
-    }
-
-    if (!agent.whatsappPhone) {
+    const targetPhoneRaw = agent.whatsappPhone || AppConfig.agents.fallbackWhatsapp;
+    if (!targetPhoneRaw) {
       logger.warn('[AgentNotification] Agent has no WhatsApp phone configured — skipping WA');
       return false;
     }
 
+    const cleanPhone = normalizeWhatsAppPhone(targetPhoneRaw);
+    const clientPhoneClean = normalizeWhatsAppPhone(prospect.phone);
+
+    if (!accessToken || !phoneNumberId) {
+      logger.info('[AgentNotification WA SIM] Would send WA template/text to specialist', {
+        specialistPhone: cleanPhone,
+        prospect: prospect.nombre,
+      });
+      return true;
+    }
+
+    // 1. Intento Primario: Plantilla HSM de Meta (Cumple política 24h)
     try {
-      // ✅ HSM Template — complies with Meta 24h window policy
-      const payload = {
+      const templatePayload = {
         messaging_product: 'whatsapp',
-        to: agent.whatsappPhone,
+        to: cleanPhone,
         type: 'template',
         template: {
-          name: waAgentTemplateName, // Configurable via env var — zero hardcoding
+          name: waAgentTemplateName,
           language: { code: 'es_MX' },
           components: [{
             type: 'body',
             parameters: [
-              { type: 'text', text: prospect.nombre.substring(0, 60) },       // {{1}}
-              { type: 'text', text: prospect.phone },                          // {{2}}
-              { type: 'text', text: prospect.montoRecibo },                    // {{3}}
-              { type: 'text', text: prospect.sistemaEstimado.substring(0, 60) }, // {{4}}
+              { type: 'text', text: prospect.nombre.substring(0, 60) },
+              { type: 'text', text: prospect.phone },
+              { type: 'text', text: prospect.montoRecibo },
+              { type: 'text', text: prospect.sistemaEstimado.substring(0, 60) },
             ],
           }],
         },
@@ -177,21 +195,76 @@ export class AgentNotificationService {
 
       const res = await fetch(
         `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`,
-        { method: 'POST', headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) }
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(templatePayload),
+        }
       );
 
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(`Meta API ${res.status}: ${JSON.stringify(errData)}`);
+      if (res.ok) {
+        logger.info('[AgentNotification] WhatsApp template sent successfully to specialist', { phone: cleanPhone });
+        return true;
       }
-      return true;
 
-    } catch (err: any) {
-      // ✅ GRACEFUL DEGRADATION: WA fails silently — email already guaranteed
-      logger.warn('[AgentNotification] WhatsApp template failed — email fallback active', {
-        agent: agent.email, error: err.message,
+      const errData = await res.json().catch(() => ({}));
+      logger.warn('[AgentNotification] WhatsApp template rejected by Meta — attempting enriched text fallback', {
+        status: res.status,
+        error: errData,
       });
-      return false; // Does NOT throw — handoff is not blocked
+    } catch (templateErr: any) {
+      logger.warn('[AgentNotification] WhatsApp template exception — attempting enriched text fallback', {
+        error: templateErr.message,
+      });
+    }
+
+    // 2. Intento de Respaldo: Mensaje de Texto Enriquecido Directo
+    try {
+      const waDirectLink = `https://wa.me/${clientPhoneClean}`;
+      const textBody =
+`🚨 *NUEVO LEAD CALIFICADO SOLAR O3 ENERGY* 🚨
+
+👤 *Cliente:* ${prospect.nombre}
+📱 *Teléfono:* +${prospect.phone}
+💬 *Chat Directo WhatsApp:* ${waDirectLink}
+💰 *Recibo CFE:* ${prospect.montoRecibo}
+⚡ *Sistema Propuesto:* ${prospect.sistemaEstimado}
+${prospect.location ? `📍 *Ubicación:* ${prospect.location}\n` : ''}${prospect.handoffReason ? `💬 *Motivo:* ${prospect.handoffReason}\n` : ''}📅 *Estado:* Pendiente de contacto para agendar cita.
+
+*Acción Requerida:* Contactar de inmediato al cliente para agendar su cita técnica.`;
+
+      const textPayload = {
+        messaging_product: 'whatsapp',
+        recipient_type: 'individual',
+        to: cleanPhone,
+        type: 'text',
+        text: { preview_url: false, body: textBody },
+      };
+
+      const textRes = await fetch(
+        `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`,
+        {
+          method: 'POST',
+          headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' },
+          body: JSON.stringify(textPayload),
+        }
+      );
+
+      if (textRes.ok) {
+        logger.info('[AgentNotification] WhatsApp enriched text sent successfully to specialist', { phone: cleanPhone });
+        return true;
+      }
+
+      const textErrData = await textRes.json().catch(() => ({}));
+      logger.warn('[AgentNotification] WhatsApp enriched text also rejected by Meta (24h customer care window constraint)', {
+        status: textRes.status,
+        error: textErrData,
+      });
+      return false;
+    } catch (textErr: any) {
+      logger.error('[AgentNotification] WhatsApp enriched text fallback exception:', { error: textErr.message });
+      return false;
     }
   }
 }
+

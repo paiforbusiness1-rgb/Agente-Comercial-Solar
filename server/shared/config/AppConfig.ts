@@ -47,7 +47,7 @@ export const AppConfig = {
   get agents() {
     return {
       fallbackEmail: process.env.FALLBACK_AGENT_EMAIL || 'ventas@o3energy.mx',
-      fallbackWhatsapp: process.env.FALLBACK_AGENT_WA || '',
+      fallbackWhatsapp: process.env.FALLBACK_AGENT_WA || '523319459597',
     };
   },
   get gemini() {

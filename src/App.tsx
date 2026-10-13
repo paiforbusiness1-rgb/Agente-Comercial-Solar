@@ -44,13 +44,15 @@ export default function App() {
   // --- HOOKS DE NEGOCIO ---
   const { toastMessage, showToast, notificationPermission, requestNotificationPermission, triggerBrowserNotification } = useNotifications();
 
-  // Refinamiento 1: Callback de notificación memoizado con dependencias estables (Regla 2 Zero Regressions)
+  // Refinamiento APO-027: Notificación Dual en UI (Toast In-App + Notificación de Escritorio)
   const handleNewLeadNotification = useCallback((lead: QualifiedLead) => {
+    const leadName = lead.nombre && lead.nombre !== 'Cliente' ? lead.nombre : 'Cliente Nuevo';
+    showToast(`🚨 ¡NUEVO LEAD CALIFICADO! ${leadName} — En espera de contacto para agendar cita`);
     triggerBrowserNotification(lead, () => {
       setActiveTab('leads');
       setLeadsSearch('');
     });
-  }, [triggerBrowserNotification]);
+  }, [triggerBrowserNotification, showToast]);
 
   const { 
     chats, setChats, leads, setLeads, isLoading, isFirebaseConnected, 

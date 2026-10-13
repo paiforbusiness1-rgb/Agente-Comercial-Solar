@@ -61,7 +61,7 @@ var AppConfig = {
   get agents() {
     return {
       fallbackEmail: process.env.FALLBACK_AGENT_EMAIL || "ventas@o3energy.mx",
-      fallbackWhatsapp: process.env.FALLBACK_AGENT_WA || ""
+      fallbackWhatsapp: process.env.FALLBACK_AGENT_WA || "523319459597"
     };
   },
   get gemini() {
@@ -1860,7 +1860,7 @@ ${quote.disclaimer}
           const displayName = clientName ? `, ${clientName}` : "";
           fallbackReply = `\xA1Excelente${displayName}! \u{1F60A} Te comparto el brochure oficial con todos los requisitos y facilidades de financiamiento. \u{1F4C4}\u2600\uFE0F
 
-Para validar tu instalaci\xF3n y dimensionamiento en sitio, \xBFte gustar\xEDa que coordinemos la visita t\xE9cnica gratuita de nuestros ingenieros a tu domicilio? \u{1F4C5}`;
+\xBFTe gustar\xEDa que te contacte uno de nuestros especialistas para agendar una cita o visita t\xE9cnica gratuita de nuestros ingenieros? \u{1F4C5}`;
           currentConv.messages.push({ sender: "bot", text: fallbackReply, timestamp: (/* @__PURE__ */ new Date()).toISOString() });
           currentConv.messages.push({
             sender: "bot",
@@ -1885,7 +1885,7 @@ Para validar tu instalaci\xF3n y dimensionamiento en sitio, \xBFte gustar\xEDa q
             currentConv.state.financingConsentGiven = false;
             currentConv.state.phase = "CLOSING";
             const displayName = clientName ? `, ${clientName}` : "";
-            fallbackReply = `\xA1Totalmente de acuerdo${displayName}! Contamos con excelentes facilidades para liquidaci\xF3n de contado. Para validar tu instalaci\xF3n y dimensionamiento en sitio, \xBFte gustar\xEDa que coordinemos la visita t\xE9cnica gratuita de nuestros ingenieros a tu domicilio? \u{1F4C5}`;
+            fallbackReply = `\xA1Totalmente de acuerdo${displayName}! Contamos con excelentes facilidades para liquidaci\xF3n de contado. \xBFTe gustar\xEDa que te contacte uno de nuestros especialistas para agendar una cita o coordinar tu visita t\xE9cnica gratuita? \u{1F4C5}`;
           } else {
             fallbackReply = `${greeting} Recib\xED tu mensaje. Estamos experimentando una peque\xF1a intermitencia t\xE9cnica en este momento. Tu informaci\xF3n ya qued\xF3 registrada y en unos minutos uno de nuestros asesores continuar\xE1 atendi\xE9ndote por aqu\xED.`;
           }
@@ -1942,10 +1942,10 @@ Para validar tu instalaci\xF3n y dimensionamiento en sitio, \xBFte gustar\xEDa q
           currentConv.state.advisorHandoffProposed = true;
           currentConv.botDisabled = true;
           const displayName = clientName ? ` ${clientName}` : "";
-          fallbackReply = `\xA1Excelente${displayName}! Con mucho gusto. En un momento uno de nuestros asesores especializados de O3 Energy se pondr\xE1 en contacto contigo directamente por aqu\xED para coordinar la fecha y hora de tu visita t\xE9cnica gratuita. \u2600\uFE0F
+          fallbackReply = `\xA1Excelente${displayName}! Con mucho gusto. En un momento uno de nuestros asesores especializados de O3 Energy se pondr\xE1 en contacto contigo a trav\xE9s de este n\xFAmero para agendar tu cita y coordinar tu visita t\xE9cnica gratuita. \u2600\uFE0F
 
 \xA1Que tengas un excelente d\xEDa!`;
-          await this.orchestrator.triggerLeadHandoff(currentConv, phone, currentConv.nombre || "Cliente", "Solicitud de visita t\xE9cnica gratuita");
+          await this.orchestrator.triggerLeadHandoff(currentConv, phone, currentConv.nombre || "Cliente", "Solicitud de especialista para agendar cita");
           leadGenerated = true;
         } else if (wantsFinancing) {
           currentConv.state.phase = "FINANCING";
@@ -1969,20 +1969,20 @@ Todas las opciones incluyen la garant\xEDa de los paneles, la instalaci\xF3n pro
           currentConv.state.financingConsentGiven = false;
           currentConv.state.phase = "CLOSING";
           const displayName = clientName ? `, ${clientName}` : "";
-          fallbackReply = `\xA1Totalmente de acuerdo${displayName}! Contamos con excelentes facilidades para liquidaci\xF3n de contado. Para validar tu instalaci\xF3n y dimensionamiento en sitio, \xBFte gustar\xEDa que coordinemos la visita t\xE9cnica gratuita de nuestros ingenieros a tu domicilio? \u{1F4C5}`;
+          fallbackReply = `\xA1Totalmente de acuerdo${displayName}! Contamos con excelentes facilidades para liquidaci\xF3n de contado. \xBFTe gustar\xEDa que te contacte uno de nuestros especialistas para agendar una cita o coordinar tu visita t\xE9cnica gratuita? \u{1F4C5}`;
         } else {
           const displayName = clientName ? `, ${clientName}` : "";
-          fallbackReply = `Para avanzar${displayName}, \xBFprefieres que te comparta nuestras opciones de financiamiento en mensualidades o coordinamos tu visita t\xE9cnica gratuita a domicilio? \u{1F4C5}`;
+          fallbackReply = `Para avanzar${displayName}, \xBFprefieres que te comparta nuestras opciones de financiamiento en mensualidades o te gustar\xEDa que te contacte uno de nuestros especialistas para agendar una cita? \u{1F4C5}`;
         }
-      } else if ((currentPhase === "CLOSING" || currentPhase === "FINANCING") && (effectiveMessageText.toLowerCase().includes("visita") || effectiveMessageText.toLowerCase().includes("agendar") || effectiveMessageText.toLowerCase().includes("asesor") || effectiveMessageText.toLowerCase().includes("humano") || effectiveMessageText.toLowerCase().includes("contacto") || currentPhase === "CLOSING" && ["si", "s\xED", "adelante", "por favor", "claro", "agendemos", "coordinemos", "agendar visita"].some((k) => effectiveMessageText.toLowerCase().trim().startsWith(k)))) {
+      } else if ((currentPhase === "CLOSING" || currentPhase === "FINANCING") && (effectiveMessageText.toLowerCase().includes("visita") || effectiveMessageText.toLowerCase().includes("agendar") || effectiveMessageText.toLowerCase().includes("cita") || effectiveMessageText.toLowerCase().includes("asesor") || effectiveMessageText.toLowerCase().includes("especialista") || effectiveMessageText.toLowerCase().includes("humano") || effectiveMessageText.toLowerCase().includes("contacto") || ["si", "s\xED", "adelante", "por favor", "claro", "agendemos", "coordinemos", "me parece bien", "ok", "dale", "agendar cita", "agendar visita"].some((k) => effectiveMessageText.toLowerCase().trim().startsWith(k)))) {
         currentConv.state.phase = "HUMAN_HANDOFF";
         currentConv.state.advisorHandoffProposed = true;
         currentConv.botDisabled = true;
         const displayName = clientName ? ` ${clientName}` : "";
-        fallbackReply = `\xA1Excelente${displayName}! Con mucho gusto. En un momento uno de nuestros asesores especializados de O3 Energy se pondr\xE1 en contacto contigo directamente por aqu\xED para coordinar la fecha y hora de tu visita t\xE9cnica gratuita. \u2600\uFE0F
+        fallbackReply = `\xA1Excelente${displayName}! Con mucho gusto. En un momento uno de nuestros asesores especializados de O3 Energy se pondr\xE1 en contacto contigo a trav\xE9s de este n\xFAmero para agendar tu cita y coordinar tu visita t\xE9cnica gratuita. \u2600\uFE0F
 
 \xA1Que tengas un excelente d\xEDa!`;
-        await this.orchestrator.triggerLeadHandoff(currentConv, phone, currentConv.nombre || "Cliente", "Solicitud de visita t\xE9cnica gratuita");
+        await this.orchestrator.triggerLeadHandoff(currentConv, phone, currentConv.nombre || "Cliente", "Solicitud de especialista para agendar cita");
         leadGenerated = true;
       } else if (currentPhase === "GREETING" || currentPhase === "QUALIFICATION") {
         const lowerText = effectiveMessageText.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
@@ -2146,8 +2146,23 @@ REGLAS ESENCIALES DE INTERACCI\xD3N Y CERO ALUCINACI\xD3N:
    - Si el cliente responde afirmativamente ("S\xED", "Adelante", "Por favor", "Mu\xE9stramela"), establece "quote_consent_given": true.
    - Cuando se entrega la cotizaci\xF3n preliminar, el sistema inyecta autom\xE1ticamente la tarjeta oficial detallada. POR LO TANTO, PROHIBIDO incluir en tu mensaje vi\xF1etas duplicadas de presupuesto (*Sistema:*, *Costo estimado:*, *Ahorro mensual:*); enf\xF3cate en presentar la propuesta amablemente e invitar a revisarla.
 
-5. PROPUESTA PROACTIVA DE VISITA T\xC9CNICA GRATUITA EN SITIO (PASO 6):
-   - Si el usuario no tiene la foto del recibo a la mano ("No la tengo a la mano") o tras haber revisado la cotizaci\xF3n y financiamiento (Paso 6), ofrece proactivamente una Visita T\xE9cnica Gratuita en Sitio por nuestros ingenieros certificados para evaluar la estructura, sombras y trayectoria el\xE9ctrica in situ. Establece "propose_technical_visit": true. El bot PERMANECE ACTIVO (botDisabled = false).
+5. PROPUESTA DE CONTACTO CON ESPECIALISTA PARA AGENDAR CITA (PASO 6 - CERO FRICCI\xD3N / APO-027):
+   - Al concluir la entrega del brochure de financiamiento, o si el usuario prefiere pago de contado, o si tras presentar la cotizaci\xF3n el cliente muestra inter\xE9s en dar el siguiente paso hacia una cita o visita:
+     Sof\xEDa DEBE proponer la cita utilizando EXACTAMENTE la siguiente formulaci\xF3n amable:
+     "\xBFTe gustar\xEDa que te contacte uno de nuestros especialistas para agendar una cita? \u{1F4C5}"
+   - TERMINANTEMENTE PROHIBIDO SOLICITAR EN EL CHAT (REGLA INAMOVIBLE U-FIRST):
+     - Direcci\xF3n, calle, n\xFAmero exterior/interior, colonia o c\xF3digo postal.
+     - Fecha u hora espec\xEDfica de visita (no negociar calendarios ni horarios).
+     - Indicaciones o referencias de ubicaci\xF3n.
+     Toda la coordinaci\xF3n de agenda y domicilio la realiza el especialista humano v\xEDa llamada o WhatsApp directo.
+   - Cuando el usuario responda afirmativamente ("s\xED", "claro", "por favor", "adelante", "ag\xE9ndame", "me parece bien", "ok", "me interesa"):
+     Sof\xEDa DEBE establecer obligatoriamente:
+     "trigger_human_handoff": true,
+     "propose_advisor_handoff": true,
+     "handoff_reason": "Cliente solicita contacto de especialista para agendar cita",
+     "next_step": 6
+     Y responder con calidez despidiendo al bot:
+     "\xA1Excelente, [Nombre]! Con mucho gusto. En un momento uno de nuestros especialistas de O3 Energy se pondr\xE1 en contacto contigo a trav\xE9s de este n\xFAmero para agendar tu cita y afinar todos los detalles t\xE9cnicos. \u2600\uFE0F \xA1Que tengas un excelente d\xEDa!"
 
 6. CANALIZACI\xD3N CON ASESOR COMERCIAL ESPECIALIZADO:
    - Si el usuario solicita hablar con una persona, requiere asesor\xEDa personalizada avanzada o pide la llamada de un especialista, establece "trigger_human_handoff": true, "propose_advisor_handoff": true y "handoff_reason": "Solicitud de atenci\xF3n humana".
@@ -2211,14 +2226,14 @@ REGLAS ESENCIALES DE INTERACCI\xD3N Y CERO ALUCINACI\xD3N:
        "financing_consent_given": true,
        "media_to_send": "FINANCIAMIENTO",
        "next_step": 5
-       Acompa\xF1a con un mensaje c\xE1lido presentando el brochure y avanza hacia la propuesta de Visita T\xE9cnica Gratuita (Paso 6).
+       Acompa\xF1a con un mensaje c\xE1lido presentando el brochure y pregunta: "\xBFTe gustar\xEDa que te contacte uno de nuestros especialistas para agendar una cita? \u{1F4C5}".
 
        Si el usuario indica que no le interesa el financiamiento o prefiere de contado ("Prefiero de contado", "No gracias"):
-       Establece "financing_consent_given": false, "media_to_send": null, respeta su decisi\xF3n con elegancia y avanza hacia la Visita T\xE9cnica Gratuita (Paso 6).
+       Establece "financing_consent_given": false, "media_to_send": null, respeta su decisi\xF3n con elegancia y avanza hacia la propuesta de cita con especialista: "\xBFTe gustar\xEDa que te contacte uno de nuestros especialistas para agendar una cita? \u{1F4C5}".
 
    - REGLA DE PARIDAD PARA BROCHURE DE FINANCIAMIENTO (Refinamiento 2):
      Si <financing_brochure_sent>true</financing_brochure_sent>:
-     TERMINANTEMENTE PROHIBIDO volver a prometer enviar el brochure de financiamiento. El brochure ya fue entregado. Si el usuario pregunta por requisitos o planes, responde: "Los requisitos completos y beneficios est\xE1n en el brochure que te compart\xED anteriormente en este chat. \xBFTienes alguna duda espec\xEDfica sobre ellos o prefieres avanzar con la visita t\xE9cnica gratuita?"
+     TERMINANTEMENTE PROHIBIDO volver a prometer enviar el brochure de financiamiento. El brochure ya fue entregado. Si el usuario pregunta por requisitos o planes, responde: "Los requisitos completos y beneficios est\xE1n en el brochure que te compart\xED anteriormente en este chat. \xBFTienes alguna duda espec\xEDfica sobre ellos o prefieres que te contacte un especialista para agendar tu cita?"
 
 11. MANEJO ELEGANTE DE RE-SOLICITUDES DE BROCHURES (Refinamiento 3 - U-First):
    - Si el usuario solicita expl\xEDcitamente que le reenv\xEDes un brochure que ya fue enviado (<instalacion_brochure_sent>true</instalacion_brochure_sent> o <financing_brochure_sent>true</financing_brochure_sent>), responde con calidez:
@@ -2538,6 +2553,16 @@ _Este presupuesto es una estimaci\xF3n aproximada basada en tu consumo reportado
 
 // server/infrastructure/services/AgentNotificationService.ts
 import nodemailer from "nodemailer";
+function normalizeWhatsAppPhone(phone) {
+  let clean = (phone || "").replace(/\D/g, "");
+  if (clean.length === 10) {
+    clean = `52${clean}`;
+  }
+  if (clean.startsWith("521") && clean.length === 13) {
+    clean = `52${clean.slice(3)}`;
+  }
+  return clean;
+}
 var AgentNotificationService = class {
   constructor(agentRepo2) {
     this.agentRepo = agentRepo2;
@@ -2641,55 +2666,105 @@ var AgentNotificationService = class {
       throw err;
     }
   }
-  // ─── WhatsApp HSM Template (Meta-compliant) ────────────────────────────────
+  // ─── WhatsApp HSM Template (Meta-compliant) + Enriched Text Fallback ───────
   async notifyWhatsApp(agent, prospect) {
     const { accessToken, phoneNumberId, waAgentTemplateName } = AppConfig.meta;
-    if (!accessToken || !phoneNumberId) {
-      logger.info("[AgentNotification WA SIM] Would send WA template to agent", { phone: agent.whatsappPhone });
-      return true;
-    }
-    if (!agent.whatsappPhone) {
+    const targetPhoneRaw = agent.whatsappPhone || AppConfig.agents.fallbackWhatsapp;
+    if (!targetPhoneRaw) {
       logger.warn("[AgentNotification] Agent has no WhatsApp phone configured \u2014 skipping WA");
       return false;
     }
+    const cleanPhone = normalizeWhatsAppPhone(targetPhoneRaw);
+    const clientPhoneClean = normalizeWhatsAppPhone(prospect.phone);
+    if (!accessToken || !phoneNumberId) {
+      logger.info("[AgentNotification WA SIM] Would send WA template/text to specialist", {
+        specialistPhone: cleanPhone,
+        prospect: prospect.nombre
+      });
+      return true;
+    }
     try {
-      const payload = {
+      const templatePayload = {
         messaging_product: "whatsapp",
-        to: agent.whatsappPhone,
+        to: cleanPhone,
         type: "template",
         template: {
           name: waAgentTemplateName,
-          // Configurable via env var — zero hardcoding
           language: { code: "es_MX" },
           components: [{
             type: "body",
             parameters: [
               { type: "text", text: prospect.nombre.substring(0, 60) },
-              // {{1}}
               { type: "text", text: prospect.phone },
-              // {{2}}
               { type: "text", text: prospect.montoRecibo },
-              // {{3}}
               { type: "text", text: prospect.sistemaEstimado.substring(0, 60) }
-              // {{4}}
             ]
           }]
         }
       };
       const res = await fetch(
         `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`,
-        { method: "POST", headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" }, body: JSON.stringify(payload) }
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+          body: JSON.stringify(templatePayload)
+        }
       );
-      if (!res.ok) {
-        const errData = await res.json().catch(() => ({}));
-        throw new Error(`Meta API ${res.status}: ${JSON.stringify(errData)}`);
+      if (res.ok) {
+        logger.info("[AgentNotification] WhatsApp template sent successfully to specialist", { phone: cleanPhone });
+        return true;
       }
-      return true;
-    } catch (err) {
-      logger.warn("[AgentNotification] WhatsApp template failed \u2014 email fallback active", {
-        agent: agent.email,
-        error: err.message
+      const errData = await res.json().catch(() => ({}));
+      logger.warn("[AgentNotification] WhatsApp template rejected by Meta \u2014 attempting enriched text fallback", {
+        status: res.status,
+        error: errData
       });
+    } catch (templateErr) {
+      logger.warn("[AgentNotification] WhatsApp template exception \u2014 attempting enriched text fallback", {
+        error: templateErr.message
+      });
+    }
+    try {
+      const waDirectLink = `https://wa.me/${clientPhoneClean}`;
+      const textBody = `\u{1F6A8} *NUEVO LEAD CALIFICADO SOLAR O3 ENERGY* \u{1F6A8}
+
+\u{1F464} *Cliente:* ${prospect.nombre}
+\u{1F4F1} *Tel\xE9fono:* +${prospect.phone}
+\u{1F4AC} *Chat Directo WhatsApp:* ${waDirectLink}
+\u{1F4B0} *Recibo CFE:* ${prospect.montoRecibo}
+\u26A1 *Sistema Propuesto:* ${prospect.sistemaEstimado}
+${prospect.location ? `\u{1F4CD} *Ubicaci\xF3n:* ${prospect.location}
+` : ""}${prospect.handoffReason ? `\u{1F4AC} *Motivo:* ${prospect.handoffReason}
+` : ""}\u{1F4C5} *Estado:* Pendiente de contacto para agendar cita.
+
+*Acci\xF3n Requerida:* Contactar de inmediato al cliente para agendar su cita t\xE9cnica.`;
+      const textPayload = {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to: cleanPhone,
+        type: "text",
+        text: { preview_url: false, body: textBody }
+      };
+      const textRes = await fetch(
+        `https://graph.facebook.com/v20.0/${phoneNumberId}/messages`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+          body: JSON.stringify(textPayload)
+        }
+      );
+      if (textRes.ok) {
+        logger.info("[AgentNotification] WhatsApp enriched text sent successfully to specialist", { phone: cleanPhone });
+        return true;
+      }
+      const textErrData = await textRes.json().catch(() => ({}));
+      logger.warn("[AgentNotification] WhatsApp enriched text also rejected by Meta (24h customer care window constraint)", {
+        status: textRes.status,
+        error: textErrData
+      });
+      return false;
+    } catch (textErr) {
+      logger.error("[AgentNotification] WhatsApp enriched text fallback exception:", { error: textErr.message });
       return false;
     }
   }
@@ -3154,9 +3229,14 @@ Mientras me pasas el dato, te comparto informaci\xF3n detallada de nuestro servi
       conv.botDisabled = true;
       conv.state.phase = "HUMAN_HANDOFF";
       conv.state.advisorHandoffProposed = true;
-      finalReply = `\xA1Con mucho gusto! En un momento uno de nuestros asesores especializados de O3 Energy se pondr\xE1 en contacto contigo directamente a trav\xE9s de este chat para brindarte atenci\xF3n personalizada. \u2600\uFE0F
+      const displayName = conv.nombre && conv.nombre !== "Cliente" ? `, ${conv.nombre}` : "";
+      if (!parsed.message_to_user || parsed.message_to_user.length < 20 || /intermitencia/i.test(parsed.message_to_user)) {
+        finalReply = `\xA1Excelente${displayName}! Con mucho gusto. En un momento uno de nuestros especialistas de O3 Energy se pondr\xE1 en contacto contigo a trav\xE9s de este n\xFAmero para coordinar tu cita y validar todos los detalles de tu instalaci\xF3n. \u2600\uFE0F
 
 \xA1Que tengas un excelente d\xEDa!`;
+      } else {
+        finalReply = parsed.message_to_user;
+      }
       await this.triggerLeadHandoff(conv, phone, userName || conv.nombre, parsed.handoff_reason || "Solicitud de cliente");
     } else {
       conv.state.phase = this.stepIntToPhase(effectiveNextStep);
@@ -3244,17 +3324,26 @@ ${finalReply}`;
   }
   async triggerLeadHandoff(conv, phone, name, reason) {
     try {
+      let quoteDetails = "Cotizaci\xF3n solicitada";
+      let systemDetails = conv.state.roofType ? `Techo ${conv.state.roofType}` : "Residencial";
+      let costFormatted = "A convenir";
+      if (conv.state.monthlyBill) {
+        const quote = this.quoteEngine.calculate(conv.state.monthlyBill, conv.state.extraLoads);
+        systemDetails = `${quote.panels} paneles (${quote.systemPowerKw} kWp) - Techo ${conv.state.roofType || "Residencial"}`;
+        costFormatted = `$${quote.estimatedCost.toLocaleString("es-MX")} MXN`;
+        quoteDetails = `Inversi\xF3n: ${costFormatted} | Ahorro: $${quote.monthlySavings.toLocaleString("es-MX")} MXN/mes`;
+      }
       const lead = {
         id: phone,
         tenantId: conv.tenantId,
         phone,
         nombre: name,
         montoRecibo: `$${conv.state.monthlyBill || 0} MXN`,
-        sistemaEstimado: `${conv.state.roofType || "Residencial"}`,
-        costoEstimado: "Cotizaci\xF3n solicitada",
+        sistemaEstimado: systemDetails,
+        costoEstimado: costFormatted,
         leadScore: 85,
         status: "pending_review",
-        privateNotes: `Lead derivado a asesor humano. Razon: ${reason}`,
+        privateNotes: `Lead derivado a especialista para agendar cita. Motivo: ${reason}. ${quoteDetails}`,
         createdAt: (/* @__PURE__ */ new Date()).toISOString()
       };
       await this.leadRepo.save(lead);
@@ -3265,7 +3354,7 @@ ${finalReply}`;
         nombre: name,
         phone,
         montoRecibo: `$${conv.state.monthlyBill || 0} MXN/mes`,
-        sistemaEstimado: conv.state.roofType || "Sistema Residencial",
+        sistemaEstimado: `${systemDetails} (${costFormatted})`,
         location: conv.state.location,
         handoffReason: reason,
         conversationSummary: conv.messages.slice(-4).map((m) => `${m.sender}: ${m.text}`).join("\n")

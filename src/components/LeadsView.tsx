@@ -497,7 +497,7 @@ export const LeadsView: React.FC<LeadsViewProps> = ({
                             {lead.createdAt ? new Date(lead.createdAt).toLocaleDateString() : 'Fecha Desconocida'}
                           </span>
                           <span className="tracking-wide">
-                            {isPending ? '🔴 PENDIENTE REVISIÓN' : '🟢 CONTACTADO'}
+                            {isPending ? '🔴 EN ESPERA DE CONTACTO' : '🟢 CONTACTADO'}
                           </span>
                         </div>
 

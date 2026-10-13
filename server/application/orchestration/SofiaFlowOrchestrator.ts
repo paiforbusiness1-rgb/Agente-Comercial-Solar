@@ -440,7 +440,12 @@ export class SofiaFlowOrchestrator {
       conv.botDisabled = true;
       conv.state.phase = 'HUMAN_HANDOFF';
       conv.state.advisorHandoffProposed = true;
-      finalReply = `¡Con mucho gusto! En un momento uno de nuestros asesores especializados de O3 Energy se pondrá en contacto contigo directamente a través de este chat para brindarte atención personalizada. ☀️\n\n¡Que tengas un excelente día!`;
+      const displayName = conv.nombre && conv.nombre !== 'Cliente' ? `, ${conv.nombre}` : '';
+      if (!parsed.message_to_user || parsed.message_to_user.length < 20 || /intermitencia/i.test(parsed.message_to_user)) {
+        finalReply = `¡Excelente${displayName}! Con mucho gusto. En un momento uno de nuestros especialistas de O3 Energy se pondrá en contacto contigo a través de este número para coordinar tu cita y validar todos los detalles de tu instalación. ☀️\n\n¡Que tengas un excelente día!`;
+      } else {
+        finalReply = parsed.message_to_user;
+      }
 
       // Save lead and alert sales team via email
       await this.triggerLeadHandoff(conv, phone, userName || conv.nombre, parsed.handoff_reason || 'Solicitud de cliente');
@@ -529,23 +534,34 @@ export class SofiaFlowOrchestrator {
 
   public async triggerLeadHandoff(conv: any, phone: string, name: string, reason: string): Promise<void> {
     try {
+      let quoteDetails = 'Cotización solicitada';
+      let systemDetails = conv.state.roofType ? `Techo ${conv.state.roofType}` : 'Residencial';
+      let costFormatted = 'A convenir';
+
+      if (conv.state.monthlyBill) {
+        const quote = this.quoteEngine.calculate(conv.state.monthlyBill, (conv.state as any).extraLoads);
+        systemDetails = `${quote.panels} paneles (${quote.systemPowerKw} kWp) - Techo ${conv.state.roofType || 'Residencial'}`;
+        costFormatted = `$${quote.estimatedCost.toLocaleString('es-MX')} MXN`;
+        quoteDetails = `Inversión: ${costFormatted} | Ahorro: $${quote.monthlySavings.toLocaleString('es-MX')} MXN/mes`;
+      }
+
       const lead: Lead = {
         id: phone,
         tenantId: conv.tenantId,
         phone,
         nombre: name,
         montoRecibo: `$${conv.state.monthlyBill || 0} MXN`,
-        sistemaEstimado: `${conv.state.roofType || 'Residencial'}`,
-        costoEstimado: 'Cotización solicitada',
+        sistemaEstimado: systemDetails,
+        costoEstimado: costFormatted,
         leadScore: 85,
         status: 'pending_review',
-        privateNotes: `Lead derivado a asesor humano. Razon: ${reason}`,
+        privateNotes: `Lead derivado a especialista para agendar cita. Motivo: ${reason}. ${quoteDetails}`,
         createdAt: new Date().toISOString(),
       };
 
       await this.leadRepo.save(lead);
 
-      // ✅ Dual notification via AgentNotificationService (Email + WA Template HSM)
+      // ✅ Dual notification via AgentNotificationService (Email + WA Template HSM / Direct Text)
       const agentRepo = new AgentRepository(this.db);
       const notificationService = new AgentNotificationService(agentRepo);
       const agent = await notificationService.getAssignedAgent(conv.tenantId);
@@ -554,7 +570,7 @@ export class SofiaFlowOrchestrator {
         nombre: name,
         phone,
         montoRecibo: `$${conv.state.monthlyBill || 0} MXN/mes`,
-        sistemaEstimado: conv.state.roofType || 'Sistema Residencial',
+        sistemaEstimado: `${systemDetails} (${costFormatted})`,
         location: (conv.state as any).location,
         handoffReason: reason,
         conversationSummary: conv.messages.slice(-4).map((m: any) => `${m.sender}: ${m.text}`).join('\n'),
