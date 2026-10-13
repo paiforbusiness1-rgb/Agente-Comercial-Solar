@@ -67,6 +67,7 @@ export interface Conversation {
   status?: 'active' | 'deleted';
   deletedAt?: string;
   deletedBy?: string;
+  restoredAt?: string;
   // Legacy lead fields (kept for backward compat with Firestore)
   montoRecibo?: string;
   sistemaEstimado?: string;

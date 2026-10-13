@@ -476,6 +476,7 @@ function cleanFirestorePayload(input) {
 
 // server/infrastructure/persistence/Repositories.ts
 var chatsStore = {};
+var trashStore = {};
 var leadsStore = {};
 var defaultState = () => ({
   phase: "GREETING",
@@ -487,13 +488,7 @@ var InMemoryConversationRepository = class {
   async findByPhone(tenantId, phone) {
     const key = `${tenantId}::${phone}`;
     const existing = chatsStore[key];
-    if (existing) {
-      if (existing.status === "deleted") {
-        existing.status = "active";
-        delete existing.deletedAt;
-        delete existing.deletedBy;
-        existing.restoredAt = (/* @__PURE__ */ new Date()).toISOString();
-      }
+    if (existing && existing.status !== "deleted") {
       return JSON.parse(JSON.stringify(existing));
     }
     return {
@@ -514,7 +509,7 @@ var InMemoryConversationRepository = class {
     if (!conversation.status) conversation.status = "active";
     const cleanConv = cleanFirestorePayload(conversation);
     const existing = chatsStore[key];
-    if (existing) {
+    if (existing && existing.status !== "deleted") {
       const msgMap = /* @__PURE__ */ new Map();
       (existing.messages || []).forEach((m) => msgMap.set(`${m.timestamp}_${m.text}`, m));
       (cleanConv.messages || []).forEach((m) => msgMap.set(`${m.timestamp}_${m.text}`, m));
@@ -547,7 +542,7 @@ var InMemoryConversationRepository = class {
     return Object.values(chatsStore).filter((c) => c.tenantId === tenantId && c.status !== "deleted");
   }
   async findTrash(tenantId) {
-    return Object.values(chatsStore).filter((c) => c.tenantId === tenantId && c.status === "deleted");
+    return Object.values(trashStore).filter((c) => c.tenantId === tenantId);
   }
   async softDelete(tenantId, phone, deletedBy) {
     const key = `${tenantId}::${phone}`;
@@ -556,28 +551,31 @@ var InMemoryConversationRepository = class {
     conv.status = "deleted";
     conv.deletedAt = (/* @__PURE__ */ new Date()).toISOString();
     conv.deletedBy = deletedBy;
-    await this.save(conv);
+    trashStore[key] = JSON.parse(JSON.stringify(conv));
+    delete chatsStore[key];
     return true;
   }
   async restore(tenantId, phone) {
     const key = `${tenantId}::${phone}`;
-    if (!chatsStore[key] || chatsStore[key].status !== "deleted") return false;
-    const conv = chatsStore[key];
+    if (!trashStore[key]) return false;
+    const conv = trashStore[key];
     conv.status = "active";
-    conv.deletedAt = void 0;
-    conv.deletedBy = void 0;
-    await this.save(conv);
+    delete conv.deletedAt;
+    delete conv.deletedBy;
+    conv.restoredAt = (/* @__PURE__ */ new Date()).toISOString();
+    chatsStore[key] = JSON.parse(JSON.stringify(conv));
+    delete trashStore[key];
     return true;
   }
   async purgeExpiredTrash(tenantId, daysRetention = 30) {
     const cutoffMs = Date.now() - daysRetention * 24 * 60 * 60 * 1e3;
     let purgedCount = 0;
-    Object.keys(chatsStore).forEach((key) => {
-      const conv = chatsStore[key];
-      if (conv.tenantId === tenantId && conv.status === "deleted") {
+    Object.keys(trashStore).forEach((key) => {
+      const conv = trashStore[key];
+      if (conv.tenantId === tenantId) {
         const deletedTime = conv.deletedAt ? new Date(conv.deletedAt).getTime() : 0;
         if (daysRetention === 0 || deletedTime <= cutoffMs) {
-          delete chatsStore[key];
+          delete trashStore[key];
           purgedCount++;
         }
       }
@@ -607,87 +605,26 @@ var FirestoreConversationRepository = class {
   }
   async findByPhone(tenantId, phone) {
     try {
-      if (this.db && typeof this.db.runTransaction === "function") {
-        return await this.db.runTransaction(async (transaction) => {
-          const chatRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
-          const trashRef = this.db.collection(`tenants/${tenantId}/deleted_chats`).doc(phone);
-          const [chatDoc, trashDoc] = await Promise.all([
-            transaction.get(chatRef),
-            transaction.get(trashRef)
-          ]);
-          if (chatDoc.exists) {
-            return { id: chatDoc.id, status: "active", ...chatDoc.data() };
-          }
-          if (trashDoc.exists) {
-            const trashedData = trashDoc.data() || {};
-            const restoredConv = {
-              ...trashedData,
-              id: phone,
-              phone,
-              tenantId,
-              status: "active",
-              restoredAt: (/* @__PURE__ */ new Date()).toISOString()
-            };
-            delete restoredConv.deletedAt;
-            delete restoredConv.deletedBy;
-            const cleanRestored = cleanFirestorePayload(restoredConv);
-            transaction.set(chatRef, cleanRestored);
-            transaction.delete(trashRef);
-            logger.info(`[FirestoreConversationRepo] Restored chat ${phone} atomically from deleted_chats in runTransaction`);
-            return cleanRestored;
-          }
-          return {
-            id: phone,
-            tenantId,
-            phone,
-            nombre: "Cliente",
-            botDisabled: false,
-            messages: [],
-            state: defaultState(),
-            lastMessageAt: (/* @__PURE__ */ new Date()).toISOString(),
-            createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-            status: "active"
-          };
-        });
-      } else {
-        const chatRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
-        const doc = await chatRef.get();
-        if (doc.exists) {
-          return { id: doc.id, status: "active", ...doc.data() };
+      const chatRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
+      const doc = await chatRef.get();
+      if (doc.exists) {
+        const data = doc.data() || {};
+        if (data.status !== "deleted") {
+          return { id: doc.id, status: "active", ...data };
         }
-        const trashRef = this.db.collection(`tenants/${tenantId}/deleted_chats`).doc(phone);
-        const trashDoc = await trashRef.get();
-        if (trashDoc.exists) {
-          const trashedData = trashDoc.data() || {};
-          const restoredConv = {
-            ...trashedData,
-            id: phone,
-            phone,
-            tenantId,
-            status: "active",
-            restoredAt: (/* @__PURE__ */ new Date()).toISOString()
-          };
-          delete restoredConv.deletedAt;
-          delete restoredConv.deletedBy;
-          const cleanRestored = cleanFirestorePayload(restoredConv);
-          await chatRef.set(cleanRestored);
-          await trashRef.delete();
-          logger.info(`[FirestoreConversationRepo] Restored chat ${phone} from deleted_chats to chats (no tx)`);
-          return cleanRestored;
-        }
-        return {
-          id: phone,
-          tenantId,
-          phone,
-          nombre: "Cliente",
-          botDisabled: false,
-          messages: [],
-          state: defaultState(),
-          lastMessageAt: (/* @__PURE__ */ new Date()).toISOString(),
-          createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-          status: "active"
-        };
       }
+      return {
+        id: phone,
+        tenantId,
+        phone,
+        nombre: "Cliente",
+        botDisabled: false,
+        messages: [],
+        state: defaultState(),
+        lastMessageAt: (/* @__PURE__ */ new Date()).toISOString(),
+        createdAt: (/* @__PURE__ */ new Date()).toISOString(),
+        status: "active"
+      };
     } catch (err) {
       logger.warn("[FirestoreConversationRepo] Fallback to In-Memory due to Firestore error", { error: err.message });
       return inMemoryConvFallback.findByPhone(tenantId, phone);
@@ -837,28 +774,63 @@ var FirestoreConversationRepository = class {
   async restore(tenantId, phone) {
     await inMemoryConvFallback.restore(tenantId, phone);
     try {
+      if (this.db && typeof this.db.runTransaction === "function") {
+        return await this.db.runTransaction(async (transaction) => {
+          const deletedRef2 = this.db.collection(`tenants/${tenantId}/deleted_chats`).doc(phone);
+          const chatRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
+          const snap2 = await transaction.get(deletedRef2);
+          if (snap2.exists) {
+            const data = snap2.data() || {};
+            const restoredPayload = cleanFirestorePayload({
+              ...data,
+              status: "active",
+              restoredAt: (/* @__PURE__ */ new Date()).toISOString()
+            });
+            delete restoredPayload.deletedAt;
+            delete restoredPayload.deletedBy;
+            transaction.set(chatRef, restoredPayload);
+            transaction.delete(deletedRef2);
+            logger.info(`[ConversationRepo] Restored chat ${phone} atomically from deleted_chats in runTransaction`);
+            return true;
+          }
+          const legacySnap2 = await transaction.get(chatRef);
+          if (legacySnap2.exists && legacySnap2.data()?.status === "deleted") {
+            transaction.set(chatRef, {
+              status: "active",
+              restoredAt: (/* @__PURE__ */ new Date()).toISOString()
+            }, { merge: true });
+            return true;
+          }
+          return false;
+        });
+      }
       const deletedRef = this.db.collection(`tenants/${tenantId}/deleted_chats`).doc(phone);
       const snap = await deletedRef.get();
       if (snap.exists) {
-        const data = snap.data();
-        const chatRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
-        await chatRef.set({
+        const data = snap.data() || {};
+        const restoredPayload = cleanFirestorePayload({
           ...data,
           status: "active",
-          deletedAt: null,
-          deletedBy: null
+          restoredAt: (/* @__PURE__ */ new Date()).toISOString()
         });
+        delete restoredPayload.deletedAt;
+        delete restoredPayload.deletedBy;
+        const chatRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
+        await chatRef.set(restoredPayload);
         await deletedRef.delete();
-        logger.info(`[ConversationRepo] Restored chat ${phone} from deleted_chats to active chats`);
+        logger.info(`[ConversationRepo] Restored chat ${phone} from deleted_chats (no tx)`);
         return true;
       }
       const docRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
-      await docRef.set({
-        status: "active",
-        deletedAt: null,
-        deletedBy: null
-      }, { merge: true });
-      return true;
+      const legacySnap = await docRef.get();
+      if (legacySnap.exists && legacySnap.data()?.status === "deleted") {
+        await docRef.set({
+          status: "active",
+          restoredAt: (/* @__PURE__ */ new Date()).toISOString()
+        }, { merge: true });
+        return true;
+      }
+      return false;
     } catch (err) {
       logger.warn("[FirestoreConversationRepo] Firestore restore failed", { error: err.message });
       return false;
@@ -4174,7 +4146,13 @@ v2Router.post("/leads/:id/notes", requireAuth, async (req, res) => {
   }
 });
 v2Router.post("/reset-demo", requireAuth, async (req, res) => {
-  return res.json({ success: true });
+  const tenantId = req.query.tenantId || req.body?.tenantId || AppConfig.tenant.defaultId;
+  try {
+    await convRepo.purgeExpiredTrash(tenantId, 0);
+    return res.json({ success: true, message: "Datos de prueba y papelera reseteados correctamente" });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
 });
 v2Router.get("/agents", requireAuth, async (req, res) => {
   try {
@@ -4617,8 +4595,39 @@ app.post("/api/reset-demo", async (_req, res) => {
       for (const doc of chatsSnap.docs) await doc.ref.delete();
       const leadsSnap = await db.collection("tenants/o3energy_mexico/qualified_leads").get();
       for (const doc of leadsSnap.docs) await doc.ref.delete();
+      const deletedSnap = await db.collection("tenants/o3energy_mexico/deleted_chats").get();
+      for (const doc of deletedSnap.docs) await doc.ref.delete();
     }
     return res.json({ success: true, message: "Datos reseteados." });
+  } catch (err) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+app.post("/api/cleanup-deleted-chats", async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    const cronSecret = process.env.CRON_SECRET;
+    if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
+      return res.status(401).json({ error: "No autorizado para ejecutar cleanup" });
+    }
+    const tenantId = "o3energy_mexico";
+    let purgedCount = 0;
+    if (!isInMemory && db) {
+      const cutoffIso = new Date(Date.now() - 30 * 24 * 60 * 60 * 1e3).toISOString();
+      const delSnap = await db.collection(`tenants/${tenantId}/deleted_chats`).get();
+      const batch = db.batch();
+      delSnap.docs.forEach((doc) => {
+        const deletedAt = doc.data()?.deletedAt;
+        if (deletedAt && deletedAt < cutoffIso) {
+          batch.delete(doc.ref);
+          purgedCount++;
+        }
+      });
+      if (purgedCount > 0) {
+        await batch.commit();
+      }
+    }
+    return res.json({ success: true, purgedCount, message: `Se purgaron ${purgedCount} chats expirados de la papelera.` });
   } catch (err) {
     return res.status(500).json({ error: err.message });
   }

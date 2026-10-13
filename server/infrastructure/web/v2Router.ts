@@ -605,7 +605,13 @@ v2Router.post('/leads/:id/notes', requireAuth, async (req: Request, res: Respons
 // ─── Utility ─────────────────────────────────────────────────────────────
 
 v2Router.post('/reset-demo', requireAuth, async (req: Request, res: Response) => {
-  return res.json({ success: true });
+  const tenantId = (req.query.tenantId as string) || req.body?.tenantId || AppConfig.tenant.defaultId;
+  try {
+    await convRepo.purgeExpiredTrash(tenantId, 0);
+    return res.json({ success: true, message: 'Datos de prueba y papelera reseteados correctamente' });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 // ─── Agent Management CRUD (Protected by requireAuth + requireRole) ────────

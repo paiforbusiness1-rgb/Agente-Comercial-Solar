@@ -8,6 +8,7 @@ import { cleanFirestorePayload } from './FirestoreSanitizer.js';
 // ─── In-Memory Fallback (replaces old inMemoryChats/inMemoryLeads) ────────
 
 const chatsStore: Record<string, Conversation> = {};
+const trashStore: Record<string, Conversation> = {};
 const leadsStore: Record<string, Lead> = {};
 
 const defaultState = (): ConversationState => ({
@@ -21,16 +22,11 @@ export class InMemoryConversationRepository implements IConversationRepository {
   async findByPhone(tenantId: string, phone: string): Promise<Conversation> {
     const key = `${tenantId}::${phone}`;
     const existing = chatsStore[key];
-    if (existing) {
-      if (existing.status === 'deleted') {
-        existing.status = 'active';
-        delete (existing as any).deletedAt;
-        delete (existing as any).deletedBy;
-        (existing as any).restoredAt = new Date().toISOString();
-      }
+    if (existing && existing.status !== 'deleted') {
       return JSON.parse(JSON.stringify(existing));
     }
-    // Cero escritura ansiosa: Retorna modelo en memoria SIN guardar en chatsStore hasta que se llame a save()
+    // Cero escritura ansiosa y Cero resurrección zombie:
+    // Si no existe o tiene status === 'deleted', retorna modelo en memoria limpio SIN guardar en chatsStore hasta que se llame a save()
     return {
       id: phone, tenantId, phone, nombre: 'Cliente',
       botDisabled: false, messages: [], state: defaultState(),
@@ -45,7 +41,7 @@ export class InMemoryConversationRepository implements IConversationRepository {
     if (!conversation.status) conversation.status = 'active';
     const cleanConv = cleanFirestorePayload(conversation);
     const existing = chatsStore[key];
-    if (existing) {
+    if (existing && existing.status !== 'deleted') {
       // Reconciliación defensiva de mensajes (Refinamiento 3 - Regla 6 SSD)
       const msgMap = new Map<string, Message>();
       (existing.messages || []).forEach((m) => msgMap.set(`${m.timestamp}_${m.text}`, m));
@@ -88,7 +84,7 @@ export class InMemoryConversationRepository implements IConversationRepository {
   }
 
   async findTrash(tenantId: string): Promise<Conversation[]> {
-    return Object.values(chatsStore).filter((c) => c.tenantId === tenantId && c.status === 'deleted');
+    return Object.values(trashStore).filter((c) => c.tenantId === tenantId);
   }
 
   async softDelete(tenantId: string, phone: string, deletedBy: string): Promise<boolean> {
@@ -98,18 +94,21 @@ export class InMemoryConversationRepository implements IConversationRepository {
     conv.status = 'deleted';
     conv.deletedAt = new Date().toISOString();
     conv.deletedBy = deletedBy;
-    await this.save(conv);
+    trashStore[key] = JSON.parse(JSON.stringify(conv));
+    delete chatsStore[key];
     return true;
   }
 
   async restore(tenantId: string, phone: string): Promise<boolean> {
     const key = `${tenantId}::${phone}`;
-    if (!chatsStore[key] || chatsStore[key].status !== 'deleted') return false;
-    const conv = chatsStore[key];
+    if (!trashStore[key]) return false;
+    const conv = trashStore[key];
     conv.status = 'active';
-    conv.deletedAt = undefined;
-    conv.deletedBy = undefined;
-    await this.save(conv);
+    delete (conv as any).deletedAt;
+    delete (conv as any).deletedBy;
+    conv.restoredAt = new Date().toISOString();
+    chatsStore[key] = JSON.parse(JSON.stringify(conv));
+    delete trashStore[key];
     return true;
   }
 
@@ -117,12 +116,12 @@ export class InMemoryConversationRepository implements IConversationRepository {
     const cutoffMs = Date.now() - daysRetention * 24 * 60 * 60 * 1000;
     let purgedCount = 0;
 
-    Object.keys(chatsStore).forEach((key) => {
-      const conv = chatsStore[key];
-      if (conv.tenantId === tenantId && conv.status === 'deleted') {
+    Object.keys(trashStore).forEach((key) => {
+      const conv = trashStore[key];
+      if (conv.tenantId === tenantId) {
         const deletedTime = conv.deletedAt ? new Date(conv.deletedAt).getTime() : 0;
         if (daysRetention === 0 || deletedTime <= cutoffMs) {
-          delete chatsStore[key];
+          delete trashStore[key];
           purgedCount++;
         }
       }
@@ -160,96 +159,30 @@ export class FirestoreConversationRepository implements IConversationRepository 
 
   async findByPhone(tenantId: string, phone: string): Promise<Conversation> {
     try {
-      if (this.db && typeof this.db.runTransaction === 'function') {
-        return await this.db.runTransaction(async (transaction: any) => {
-          const chatRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
-          const trashRef = this.db.collection(`tenants/${tenantId}/deleted_chats`).doc(phone);
-
-          const [chatDoc, trashDoc] = await Promise.all([
-            transaction.get(chatRef),
-            transaction.get(trashRef),
-          ]);
-
-          if (chatDoc.exists) {
-            return { id: chatDoc.id, status: 'active', ...chatDoc.data() } as Conversation;
-          }
-
-          if (trashDoc.exists) {
-            // Refinamiento A: Restauración atómica con runTransaction
-            const trashedData = trashDoc.data() || {};
-            const restoredConv: Conversation = {
-              ...trashedData,
-              id: phone,
-              phone,
-              tenantId,
-              status: 'active',
-              restoredAt: new Date().toISOString(),
-            };
-            delete (restoredConv as any).deletedAt;
-            delete (restoredConv as any).deletedBy;
-
-            const cleanRestored = cleanFirestorePayload(restoredConv);
-            transaction.set(chatRef, cleanRestored);
-            transaction.delete(trashRef);
-            logger.info(`[FirestoreConversationRepo] Restored chat ${phone} atomically from deleted_chats in runTransaction`);
-            return cleanRestored;
-          }
-
-          // Cero escritura ansiosa: Retornar modelo en memoria sin persistir en Firestore
-          return {
-            id: phone,
-            tenantId,
-            phone,
-            nombre: 'Cliente',
-            botDisabled: false,
-            messages: [],
-            state: defaultState(),
-            lastMessageAt: new Date().toISOString(),
-            createdAt: new Date().toISOString(),
-            status: 'active',
-          };
-        });
-      } else {
-        const chatRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
-        const doc = await chatRef.get();
-        if (doc.exists) {
-          return { id: doc.id, status: 'active', ...doc.data() } as Conversation;
+      const chatRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
+      const doc = await chatRef.get();
+      if (doc.exists) {
+        const data = doc.data() || {};
+        if (data.status !== 'deleted') {
+          return { id: doc.id, status: 'active', ...data } as Conversation;
         }
-
-        const trashRef = this.db.collection(`tenants/${tenantId}/deleted_chats`).doc(phone);
-        const trashDoc = await trashRef.get();
-        if (trashDoc.exists) {
-          const trashedData = trashDoc.data() || {};
-          const restoredConv: Conversation = {
-            ...trashedData,
-            id: phone,
-            phone,
-            tenantId,
-            status: 'active',
-            restoredAt: new Date().toISOString(),
-          };
-          delete (restoredConv as any).deletedAt;
-          delete (restoredConv as any).deletedBy;
-          const cleanRestored = cleanFirestorePayload(restoredConv);
-          await chatRef.set(cleanRestored);
-          await trashRef.delete();
-          logger.info(`[FirestoreConversationRepo] Restored chat ${phone} from deleted_chats to chats (no tx)`);
-          return cleanRestored;
-        }
-
-        return {
-          id: phone,
-          tenantId,
-          phone,
-          nombre: 'Cliente',
-          botDisabled: false,
-          messages: [],
-          state: defaultState(),
-          lastMessageAt: new Date().toISOString(),
-          createdAt: new Date().toISOString(),
-          status: 'active',
-        };
       }
+
+      // Cero escritura ansiosa y Cero resurrección zombie:
+      // Si el chat no existe o está en papelera (deleted), retorna modelo en memoria limpio.
+      // NUNCA resucita chats archivados en deleted_chats automáticamente ante un mensaje inbound.
+      return {
+        id: phone,
+        tenantId,
+        phone,
+        nombre: 'Cliente',
+        botDisabled: false,
+        messages: [],
+        state: defaultState(),
+        lastMessageAt: new Date().toISOString(),
+        createdAt: new Date().toISOString(),
+        status: 'active',
+      };
     } catch (err: any) {
       logger.warn('[FirestoreConversationRepo] Fallback to In-Memory due to Firestore error', { error: err.message });
       return inMemoryConvFallback.findByPhone(tenantId, phone);
@@ -448,32 +381,71 @@ export class FirestoreConversationRepository implements IConversationRepository 
   async restore(tenantId: string, phone: string): Promise<boolean> {
     await inMemoryConvFallback.restore(tenantId, phone);
     try {
-      // 1. Check if archived in deleted_chats
+      if (this.db && typeof this.db.runTransaction === 'function') {
+        return await this.db.runTransaction(async (transaction: any) => {
+          const deletedRef = this.db.collection(`tenants/${tenantId}/deleted_chats`).doc(phone);
+          const chatRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
+
+          const snap = await transaction.get(deletedRef);
+          if (snap.exists) {
+            const data = snap.data() || {};
+            const restoredPayload = cleanFirestorePayload({
+              ...data,
+              status: 'active',
+              restoredAt: new Date().toISOString(),
+            });
+            delete (restoredPayload as any).deletedAt;
+            delete (restoredPayload as any).deletedBy;
+
+            transaction.set(chatRef, restoredPayload);
+            transaction.delete(deletedRef);
+            logger.info(`[ConversationRepo] Restored chat ${phone} atomically from deleted_chats in runTransaction`);
+            return true;
+          }
+
+          // Legacy check in chats
+          const legacySnap = await transaction.get(chatRef);
+          if (legacySnap.exists && legacySnap.data()?.status === 'deleted') {
+            transaction.set(chatRef, {
+              status: 'active',
+              restoredAt: new Date().toISOString(),
+            }, { merge: true });
+            return true;
+          }
+
+          return false;
+        });
+      }
+
+      // Fallback sin runTransaction (ej. mock simple)
       const deletedRef = this.db.collection(`tenants/${tenantId}/deleted_chats`).doc(phone);
       const snap = await deletedRef.get();
-
       if (snap.exists) {
-        const data = snap.data()!;
-        const chatRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
-        await chatRef.set({
+        const data = snap.data() || {};
+        const restoredPayload = cleanFirestorePayload({
           ...data,
           status: 'active',
-          deletedAt: null,
-          deletedBy: null,
+          restoredAt: new Date().toISOString(),
         });
+        delete (restoredPayload as any).deletedAt;
+        delete (restoredPayload as any).deletedBy;
+        const chatRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
+        await chatRef.set(restoredPayload);
         await deletedRef.delete();
-        logger.info(`[ConversationRepo] Restored chat ${phone} from deleted_chats to active chats`);
+        logger.info(`[ConversationRepo] Restored chat ${phone} from deleted_chats (no tx)`);
         return true;
       }
 
-      // 2. Legacy fallback in chats
       const docRef = this.db.collection(`tenants/${tenantId}/chats`).doc(phone);
-      await docRef.set({
-        status: 'active',
-        deletedAt: null,
-        deletedBy: null,
-      }, { merge: true });
-      return true;
+      const legacySnap = await docRef.get();
+      if (legacySnap.exists && legacySnap.data()?.status === 'deleted') {
+        await docRef.set({
+          status: 'active',
+          restoredAt: new Date().toISOString(),
+        }, { merge: true });
+        return true;
+      }
+      return false;
     } catch (err: any) {
       logger.warn('[FirestoreConversationRepo] Firestore restore failed', { error: err.message });
       return false;

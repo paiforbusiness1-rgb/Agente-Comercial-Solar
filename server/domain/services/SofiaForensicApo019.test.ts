@@ -354,8 +354,10 @@ describe('SQA Forense Plan APO-019 — Tests T63 a T67 (Sanitización Firestore,
     };
 
     const repo = new FirestoreConversationRepository(mockDb);
-    const restored = await repo.findByPhone(tenantId, phone);
+    const success = await repo.restore(tenantId, phone);
 
+    expect(success).toBe(true);
+    const restored = inMemoryDb[`tenants/${tenantId}/chats/${phone}`];
     expect(restored.status).toBe('active');
     expect(restored.nombre).toBe('Cliente Legacy');
     expect(restored).not.toHaveProperty('deletedAt');

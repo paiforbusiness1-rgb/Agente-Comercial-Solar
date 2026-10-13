@@ -395,9 +395,42 @@ app.post('/api/reset-demo', async (_req, res) => {
       for (const doc of chatsSnap.docs) await doc.ref.delete();
       const leadsSnap = await db.collection('tenants/o3energy_mexico/qualified_leads').get();
       for (const doc of leadsSnap.docs) await doc.ref.delete();
+      const deletedSnap = await db.collection('tenants/o3energy_mexico/deleted_chats').get();
+      for (const doc of deletedSnap.docs) await doc.ref.delete();
     }
     return res.json({ success: true, message: 'Datos reseteados.' });
   } catch (err: any) { return res.status(500).json({ error: err.message }); }
+});
+
+// Purge deleted chats with 30-day retention filter (Cron / Admin - Regla 6 SSD)
+app.post('/api/cleanup-deleted-chats', async (req, res) => {
+  try {
+    const authHeader = req.headers.authorization;
+    const cronSecret = process.env.CRON_SECRET;
+    if (cronSecret && authHeader !== `Bearer ${cronSecret}`) {
+      return res.status(401).json({ error: 'No autorizado para ejecutar cleanup' });
+    }
+    const tenantId = 'o3energy_mexico';
+    let purgedCount = 0;
+    if (!isInMemory && db) {
+      const cutoffIso = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+      const delSnap = await db.collection(`tenants/${tenantId}/deleted_chats`).get();
+      const batch = db.batch();
+      delSnap.docs.forEach((doc: any) => {
+        const deletedAt = doc.data()?.deletedAt;
+        if (deletedAt && deletedAt < cutoffIso) {
+          batch.delete(doc.ref);
+          purgedCount++;
+        }
+      });
+      if (purgedCount > 0) {
+        await batch.commit();
+      }
+    }
+    return res.json({ success: true, purgedCount, message: `Se purgaron ${purgedCount} chats expirados de la papelera.` });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 // Export the Express app as the Vercel serverless handler

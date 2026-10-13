@@ -102,9 +102,9 @@ describe('SQA Forense Plan APO-018 — Tests T58 a T62 (Transacciones Atómicas,
   }
 
   // ──────────────────────────────────────────────────────────────────────────
-  // T58: Concurrencia Extrema con Restauración Atómica y Array Union (Refinamiento A)
+  // T58: Cero Resurrección Inbound y Lectura Pura en findByPhone (APO-021)
   // ──────────────────────────────────────────────────────────────────────────
-  it('T58 (Concurrencia Extrema): 5 webhooks concurrentes restauran chat archivado sin pérdida ni sobrescritura de mensajes', async () => {
+  it('T58 (Cero Resurrección Inbound): Webhook entrante para un número en deleted_chats retorna un objeto limpio en memoria y no resucita historial', async () => {
     const phone = '5214777241148';
     const harness = createHarness();
 
@@ -123,42 +123,28 @@ describe('SQA Forense Plan APO-018 — Tests T58 a T62 (Transacciones Atómicas,
     const trashedBefore = await harness.convRepo.findTrash(tenantId);
     expect(trashedBefore.some((c) => c.phone === phone)).toBe(true);
 
-    // 2. Disparar 5 webhooks concurrentes con textos disjuntos
-    const texts = ['Mensaje A', 'Mensaje B', 'Mensaje C', 'Mensaje D', 'Mensaje E'];
-    const promises = texts.map((text, idx) =>
-      harness.useCase.execute({
-        phone,
-        text,
-        name: 'Héctor',
-        inboundTimestamp: `2026-10-12T20:18:2${idx}.000Z`,
-      })
-    );
+    // 2. findByPhone para este número archivado DEBE retornar modelo limpio
+    const freshConv = await harness.convRepo.findByPhone(tenantId, phone);
+    expect(freshConv.nombre).toBe('Cliente');
+    expect(freshConv.messages).toHaveLength(0);
+    expect(freshConv.state.phase).toBe('GREETING');
 
-    const results = await Promise.all(promises);
-    expect(results).toHaveLength(5);
-
-    // 3. Aserciones de Integridad y Cero Pérdida
-    const restoredConv = await harness.convRepo.findByPhone(tenantId, phone);
-    expect(restoredConv.status).toBe('active');
-    expect(restoredConv.nombre).toBe('Héctor');
-
-    // Verificar que la papelera ya no lo contiene
-    const trashedAfter = await harness.convRepo.findTrash(tenantId);
-    expect(trashedAfter.some((c) => c.phone === phone)).toBe(false);
-
-    // Verificar que TODOS los mensajes de los 5 webhooks están presentes en el historial
-    const messageTexts = restoredConv.messages.map((m) => m.text);
-    texts.forEach((txt) => {
-      expect(messageTexts).toContain(txt);
+    // 3. Ejecutar webhook entrante (nuevo mensaje "hola!")
+    await harness.useCase.execute({
+      phone,
+      text: 'hola!',
+      name: 'Cliente',
+      inboundTimestamp: '2026-10-12T20:18:20.000Z',
     });
 
-    // 3 mensajes históricos originales deben preservarse
-    expect(messageTexts).toContain('Histórico 1');
-    expect(messageTexts).toContain('Histórico 2');
-    expect(messageTexts).toContain('Respuesta 1');
-
-    // No hubo sobrescritura ciega (mínimo 3 históricos + 5 usuarios + 5 bot = 13 mensajes)
-    expect(restoredConv.messages.length).toBeGreaterThanOrEqual(8);
+    // 4. Aserciones de Integridad: Conversación nueva no contiene mensajes históricos
+    const activeConv = await harness.convRepo.findByPhone(tenantId, phone);
+    expect(activeConv.status).toBe('active');
+    const messageTexts = activeConv.messages.map((m) => m.text);
+    expect(messageTexts).not.toContain('Histórico 1');
+    expect(messageTexts).not.toContain('Histórico 2');
+    expect(messageTexts).not.toContain('Respuesta 1');
+    expect(messageTexts).toContain('hola!');
   });
 
   // ──────────────────────────────────────────────────────────────────────────
