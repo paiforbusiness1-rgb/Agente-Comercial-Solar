@@ -23,6 +23,8 @@ import {
   CfeExtractionResult,
 } from '../../domain/services/CfeReceiptExtractorService.js';
 import { BillNormalizerService } from '../../domain/services/BillNormalizerService.js';
+import { IQuoteEngine } from '../../interfaces/IQuoteEngine.js';
+import { SolarQuoteEngine } from '../../infrastructure/engines/SolarQuoteEngine.js';
 
 export interface MediaAttachmentItem {
   mediaId: string;
@@ -46,6 +48,7 @@ export interface IncomingMessage {
 export class ReceiveMessageUseCase {
   private mediaService: WhatsAppMediaService;
   private extractorService: CfeReceiptExtractorService;
+  private quoteEngine: IQuoteEngine;
 
   constructor(
     private convRepo: IConversationRepository,
@@ -53,10 +56,12 @@ export class ReceiveMessageUseCase {
     private sendWhatsApp: (phone: string, text: string) => Promise<boolean>,
     private sendWhatsAppMedia: (phone: string, mediaUrl: string, caption?: string) => Promise<boolean>,
     mediaService?: WhatsAppMediaService,
-    extractorService?: CfeReceiptExtractorService
+    extractorService?: CfeReceiptExtractorService,
+    quoteEngine?: IQuoteEngine
   ) {
     this.mediaService = mediaService || new WhatsAppMediaService();
     this.extractorService = extractorService || new CfeReceiptExtractorService();
+    this.quoteEngine = quoteEngine || new SolarQuoteEngine();
   }
 
   async execute(input: IncomingMessage): Promise<{ reply: string; leadGenerated: boolean }> {
@@ -338,11 +343,48 @@ export class ReceiveMessageUseCase {
       const clientName = currentConv.nombre && currentConv.nombre !== 'Cliente' ? currentConv.nombre : '';
       const greeting = clientName ? `¡Hola ${clientName}! 😊` : '¡Hola! 😊';
       let fallbackReply = '';
+      let leadGenerated = false;
 
-      // GUARDIA ESTRICTA (Observación 3 de Auditoría):
-      // Si el recibo ya fue extraído con éxito, NO enviamos intermitencia técnica.
-      // Confirmamos el recibo de inmediato, persistimos el estado y preguntamos por el techo.
-      if (extractedBill && typeof extractedBill.amount === 'number' && extractedBill.amount > 0) {
+      // ─── REGLA ESTRICTA STATE-AWARE (APO-023 / EXIGENCIA 1 DE AUDITORÍA) ───────
+      const currentPhase = currentConv.state.phase;
+      const hasBill = Boolean(
+        (currentConv.state.monthlyBill && currentConv.state.monthlyBill > 0) ||
+        (currentConv.state.bimestralBill && currentConv.state.bimestralBill > 0)
+      );
+      const hasRoof = Boolean(currentConv.state.roofType && currentConv.state.roofType !== '');
+      const monthlyBillMxn =
+        currentConv.state.monthlyBill ||
+        (currentConv.state.bimestralBill ? Math.round(currentConv.state.bimestralBill / 2) : 0);
+
+      // CASO 1: AVANCE DETERMINISTA EN RELEVAMIENTO TÉCNICO TRAS RESPUESTA DE SOMBRAS
+      // Si el LLM falla, PERO tenemos datos suficientes en Firestore (fase TECHNICAL_SURVEY, monto y techo):
+      if (currentPhase === 'TECHNICAL_SURVEY' && hasBill && hasRoof) {
+        const shadeKeywords = ['despejado', 'sin sombra', 'sin sombras', 'despejada', 'no hay sombra', 'ninguna', 'cero sombras', 'libre', 'nada'];
+        const isCleared = shadeKeywords.some((keyword) => effectiveMessageText.toLowerCase().includes(keyword));
+        const hasShade = !isCleared;
+
+        // AVANCE DETERMINISTA SIN LLM
+        currentConv.state.hasShade = hasShade;
+        currentConv.state.shadowsAssessed = true;
+        currentConv.state.shadows_assessed = true;
+        currentConv.state.phase = 'QUOTATION';
+        currentConv.state.quoteConsentRequested = true;
+        if (!currentConv.state.completedSteps.includes('ROOF_CONFIRMED')) {
+          currentConv.state.completedSteps.push('ROOF_CONFIRMED');
+        }
+        if (!currentConv.state.completedSteps.includes('SHADOWS_ASSESSED')) {
+          currentConv.state.completedSteps.push('SHADOWS_ASSESSED');
+        }
+
+        const quote = this.quoteEngine.calculate(monthlyBillMxn);
+        const roofDesc = currentConv.state.roofType;
+        const shadeDesc = hasShade ? 'posibles sombras' : 'despejado';
+        const displayName = clientName ? `${clientName}` : 'Cliente';
+
+        fallbackReply = `¡Excelente, ${displayName}! Con tu techo de ${roofDesc} y ${shadeDesc}, tu sistema preliminar es de aproximadamente ${quote.panels} paneles solares de alta eficiencia (${quote.systemPowerKw} kWp). ¿Te gustaría que te presente la propuesta preliminar de inversión y ahorro estimado? 😊`;
+      }
+      // CASO 2: Recibo extraído en este turno vía upload de archivo
+      else if (extractedBill && typeof extractedBill.amount === 'number' && extractedBill.amount > 0) {
         currentConv.state.monthlyBill =
           extractedBill.frequency === 'bimestral'
             ? Math.round(extractedBill.amount / 2)
@@ -355,14 +397,45 @@ export class ReceiveMessageUseCase {
         currentConv.state.phase = 'TECHNICAL_SURVEY';
         (currentConv as any).montoRecibo = `$${extractedBill.amount.toLocaleString('es-MX')} MXN (${extractedBill.frequency || 'mensual'})`;
         currentConv.state.equivalenceStated = true;
+        if (!currentConv.state.completedSteps.includes('BILL_NORMALIZED')) {
+          currentConv.state.completedSteps.push('BILL_NORMALIZED');
+        }
 
         const namePrefix = clientName ? `¡Excelente, ${clientName}! ` : '¡Excelente! ';
         const pagesNote = extractedBill.bothPagesAnalyzed
           ? 'He analizado con éxito ambas páginas de tu recibo CFE 📄. '
           : '';
         fallbackReply = `${namePrefix}${pagesNote}Recibí tu recibo de CFE por $${extractedBill.amount.toLocaleString('es-MX')} MXN (${extractedBill.frequency || 'mensual'}). Para diseñar tu solución solar a la medida, ¿podrías indicarme qué tipo de techo tienes en tu propiedad (concreto, lámina o teja)? 🏠`;
+      }
+      // CASO 3: En TECHNICAL_SURVEY con recibo, esperando techo
+      else if (currentPhase === 'TECHNICAL_SURVEY' && hasBill && !hasRoof) {
+        const roofMatch = /(concreto|l[aá]mina|teja)/i.exec(effectiveMessageText);
+        if (roofMatch) {
+          currentConv.state.roofType = roofMatch[1].toLowerCase();
+          if (!currentConv.state.completedSteps.includes('ROOF_CONFIRMED')) {
+            currentConv.state.completedSteps.push('ROOF_CONFIRMED');
+          }
+          const displayName = clientName ? `, ${clientName}` : '';
+          fallbackReply = `¡Excelente${displayName}! Tu techo es de ${currentConv.state.roofType}. Ahora, ¿hay alguna sombra (árboles, tinacos, edificios u otras estructuras) sobre tu techo, o está completamente despejado? ☀️`;
+        } else {
+          fallbackReply = `${greeting} Para diseñar tu sistema solar a la medida, ¿podrías indicarme qué tipo de techo tienes (concreto, lámina o teja)? 🏠`;
+        }
+      }
+      // CASO 4: En QUOTATION esperando consentimiento, y el usuario dice "sí" / "adelante"
+      else if (currentPhase === 'QUOTATION' && hasBill && !currentConv.state.completedSteps.includes('QUOTE_SENT')) {
+        const lowerText = effectiveMessageText.toLowerCase().trim();
+        const explicitAffirmative = ['si', 'sí', 'adelante', 'por favor', 'muéstramela', 'muestramela', 'ver cotizacion', 'ver cotización', 'claro'].some(k => lowerText === k || lowerText.startsWith(k));
+        if (explicitAffirmative) {
+          currentConv.state.quoteConsentGiven = true;
+          currentConv.state.completedSteps.push('QUOTE_SENT');
+          const quote = this.quoteEngine.calculate(monthlyBillMxn, (currentConv.state as any).extraLoads);
+          const displayName = clientName ? `, ${clientName}` : '';
+          fallbackReply = `¡Con mucho gusto${displayName}! Aquí tienes tu propuesta personalizada:\n\n☀️ *Sistema Propuesto:* ${quote.systemDescription}\n💰 *Inversión Estimada:* ${quote.costFormatted}\n📉 *Ahorro Estimado:* ${quote.monthlySavingsFormatted} al mes (${quote.annualSavingsFormatted} al año)\n⏳ *Retorno de Inversión (ROI):* ~${quote.roiYears} años\n\n${quote.disclaimer}\n\n¿Te gustaría conocer nuestras opciones de financiamiento con pagos mensuales accesibles o prefieres agendar una visita técnica gratuita a tu domicilio? 📅`;
+        } else {
+          fallbackReply = `${greeting} Recibí tu mensaje. Estamos experimentando una pequeña intermitencia técnica en este momento. Tu información ya quedó registrada y en unos minutos uno de nuestros asesores continuará atendiéndote por aquí.`;
+        }
       } else {
-        // Fallback Secundario: Solo si NO hay recibo extraído válido
+        // Fallback Secundario: Solo si NO hay datos suficientes para continuar deterministamente
         fallbackReply = `${greeting} Recibí tu mensaje. Estamos experimentando una pequeña intermitencia técnica en este momento. Tu información ya quedó registrada y en unos minutos uno de nuestros asesores continuará atendiéndote por aquí.`;
       }
 
@@ -375,7 +448,7 @@ export class ReceiveMessageUseCase {
       await this.convRepo.save(currentConv);
       await this.sendWhatsApp(phone, fallbackReply);
 
-      return { reply: fallbackReply, leadGenerated: false };
+      return { reply: fallbackReply, leadGenerated: currentConv.botDisabled };
     }
 
     // 4. Enviar respuesta textual vía WhatsApp

@@ -1522,13 +1522,14 @@ var BillNormalizerService = class {
 
 // server/application/usecases/ReceiveMessageUseCase.ts
 var ReceiveMessageUseCase = class {
-  constructor(convRepo2, orchestrator, sendWhatsApp, sendWhatsAppMedia2, mediaService, extractorService) {
+  constructor(convRepo2, orchestrator, sendWhatsApp, sendWhatsAppMedia2, mediaService, extractorService, quoteEngine2) {
     this.convRepo = convRepo2;
     this.orchestrator = orchestrator;
     this.sendWhatsApp = sendWhatsApp;
     this.sendWhatsAppMedia = sendWhatsAppMedia2;
     this.mediaService = mediaService || new WhatsAppMediaService();
     this.extractorService = extractorService || new CfeReceiptExtractorService();
+    this.quoteEngine = quoteEngine2 || new SolarQuoteEngine();
   }
   async execute(input) {
     const tenantId = input.tenantId || AppConfig.tenant.defaultId;
@@ -1745,16 +1746,79 @@ var ReceiveMessageUseCase = class {
       const clientName = currentConv.nombre && currentConv.nombre !== "Cliente" ? currentConv.nombre : "";
       const greeting = clientName ? `\xA1Hola ${clientName}! \u{1F60A}` : "\xA1Hola! \u{1F60A}";
       let fallbackReply = "";
-      if (extractedBill && typeof extractedBill.amount === "number" && extractedBill.amount > 0) {
+      let leadGenerated = false;
+      const currentPhase = currentConv.state.phase;
+      const hasBill = Boolean(
+        currentConv.state.monthlyBill && currentConv.state.monthlyBill > 0 || currentConv.state.bimestralBill && currentConv.state.bimestralBill > 0
+      );
+      const hasRoof = Boolean(currentConv.state.roofType && currentConv.state.roofType !== "");
+      const monthlyBillMxn = currentConv.state.monthlyBill || (currentConv.state.bimestralBill ? Math.round(currentConv.state.bimestralBill / 2) : 0);
+      if (currentPhase === "TECHNICAL_SURVEY" && hasBill && hasRoof) {
+        const shadeKeywords = ["despejado", "sin sombra", "sin sombras", "despejada", "no hay sombra", "ninguna", "cero sombras", "libre", "nada"];
+        const isCleared = shadeKeywords.some((keyword) => effectiveMessageText.toLowerCase().includes(keyword));
+        const hasShade = !isCleared;
+        currentConv.state.hasShade = hasShade;
+        currentConv.state.shadowsAssessed = true;
+        currentConv.state.shadows_assessed = true;
+        currentConv.state.phase = "QUOTATION";
+        currentConv.state.quoteConsentRequested = true;
+        if (!currentConv.state.completedSteps.includes("ROOF_CONFIRMED")) {
+          currentConv.state.completedSteps.push("ROOF_CONFIRMED");
+        }
+        if (!currentConv.state.completedSteps.includes("SHADOWS_ASSESSED")) {
+          currentConv.state.completedSteps.push("SHADOWS_ASSESSED");
+        }
+        const quote = this.quoteEngine.calculate(monthlyBillMxn);
+        const roofDesc = currentConv.state.roofType;
+        const shadeDesc = hasShade ? "posibles sombras" : "despejado";
+        const displayName = clientName ? `${clientName}` : "Cliente";
+        fallbackReply = `\xA1Excelente, ${displayName}! Con tu techo de ${roofDesc} y ${shadeDesc}, tu sistema preliminar es de aproximadamente ${quote.panels} paneles solares de alta eficiencia (${quote.systemPowerKw} kWp). \xBFTe gustar\xEDa que te presente la propuesta preliminar de inversi\xF3n y ahorro estimado? \u{1F60A}`;
+      } else if (extractedBill && typeof extractedBill.amount === "number" && extractedBill.amount > 0) {
         currentConv.state.monthlyBill = extractedBill.frequency === "bimestral" ? Math.round(extractedBill.amount / 2) : extractedBill.amount;
         currentConv.state.bimestralBill = extractedBill.frequency === "bimestral" ? extractedBill.amount : extractedBill.amount * 2;
         currentConv.state.billFrequency = extractedBill.frequency || "mensual";
         currentConv.state.phase = "TECHNICAL_SURVEY";
         currentConv.montoRecibo = `$${extractedBill.amount.toLocaleString("es-MX")} MXN (${extractedBill.frequency || "mensual"})`;
         currentConv.state.equivalenceStated = true;
+        if (!currentConv.state.completedSteps.includes("BILL_NORMALIZED")) {
+          currentConv.state.completedSteps.push("BILL_NORMALIZED");
+        }
         const namePrefix = clientName ? `\xA1Excelente, ${clientName}! ` : "\xA1Excelente! ";
         const pagesNote = extractedBill.bothPagesAnalyzed ? "He analizado con \xE9xito ambas p\xE1ginas de tu recibo CFE \u{1F4C4}. " : "";
         fallbackReply = `${namePrefix}${pagesNote}Recib\xED tu recibo de CFE por $${extractedBill.amount.toLocaleString("es-MX")} MXN (${extractedBill.frequency || "mensual"}). Para dise\xF1ar tu soluci\xF3n solar a la medida, \xBFpodr\xEDas indicarme qu\xE9 tipo de techo tienes en tu propiedad (concreto, l\xE1mina o teja)? \u{1F3E0}`;
+      } else if (currentPhase === "TECHNICAL_SURVEY" && hasBill && !hasRoof) {
+        const roofMatch = /(concreto|l[aá]mina|teja)/i.exec(effectiveMessageText);
+        if (roofMatch) {
+          currentConv.state.roofType = roofMatch[1].toLowerCase();
+          if (!currentConv.state.completedSteps.includes("ROOF_CONFIRMED")) {
+            currentConv.state.completedSteps.push("ROOF_CONFIRMED");
+          }
+          const displayName = clientName ? `, ${clientName}` : "";
+          fallbackReply = `\xA1Excelente${displayName}! Tu techo es de ${currentConv.state.roofType}. Ahora, \xBFhay alguna sombra (\xE1rboles, tinacos, edificios u otras estructuras) sobre tu techo, o est\xE1 completamente despejado? \u2600\uFE0F`;
+        } else {
+          fallbackReply = `${greeting} Para dise\xF1ar tu sistema solar a la medida, \xBFpodr\xEDas indicarme qu\xE9 tipo de techo tienes (concreto, l\xE1mina o teja)? \u{1F3E0}`;
+        }
+      } else if (currentPhase === "QUOTATION" && hasBill && !currentConv.state.completedSteps.includes("QUOTE_SENT")) {
+        const lowerText = effectiveMessageText.toLowerCase().trim();
+        const explicitAffirmative = ["si", "s\xED", "adelante", "por favor", "mu\xE9stramela", "muestramela", "ver cotizacion", "ver cotizaci\xF3n", "claro"].some((k) => lowerText === k || lowerText.startsWith(k));
+        if (explicitAffirmative) {
+          currentConv.state.quoteConsentGiven = true;
+          currentConv.state.completedSteps.push("QUOTE_SENT");
+          const quote = this.quoteEngine.calculate(monthlyBillMxn, currentConv.state.extraLoads);
+          const displayName = clientName ? `, ${clientName}` : "";
+          fallbackReply = `\xA1Con mucho gusto${displayName}! Aqu\xED tienes tu propuesta personalizada:
+
+\u2600\uFE0F *Sistema Propuesto:* ${quote.systemDescription}
+\u{1F4B0} *Inversi\xF3n Estimada:* ${quote.costFormatted}
+\u{1F4C9} *Ahorro Estimado:* ${quote.monthlySavingsFormatted} al mes (${quote.annualSavingsFormatted} al a\xF1o)
+\u23F3 *Retorno de Inversi\xF3n (ROI):* ~${quote.roiYears} a\xF1os
+
+${quote.disclaimer}
+
+\xBFTe gustar\xEDa conocer nuestras opciones de financiamiento con pagos mensuales accesibles o prefieres agendar una visita t\xE9cnica gratuita a tu domicilio? \u{1F4C5}`;
+        } else {
+          fallbackReply = `${greeting} Recib\xED tu mensaje. Estamos experimentando una peque\xF1a intermitencia t\xE9cnica en este momento. Tu informaci\xF3n ya qued\xF3 registrada y en unos minutos uno de nuestros asesores continuar\xE1 atendi\xE9ndote por aqu\xED.`;
+        }
       } else {
         fallbackReply = `${greeting} Recib\xED tu mensaje. Estamos experimentando una peque\xF1a intermitencia t\xE9cnica en este momento. Tu informaci\xF3n ya qued\xF3 registrada y en unos minutos uno de nuestros asesores continuar\xE1 atendi\xE9ndote por aqu\xED.`;
       }
@@ -1766,7 +1830,7 @@ var ReceiveMessageUseCase = class {
       currentConv.lastMessageAt = (/* @__PURE__ */ new Date()).toISOString();
       await this.convRepo.save(currentConv);
       await this.sendWhatsApp(phone, fallbackReply);
-      return { reply: fallbackReply, leadGenerated: false };
+      return { reply: fallbackReply, leadGenerated: currentConv.botDisabled };
     }
     if (result.replyText) {
       await this.sendWhatsApp(phone, result.replyText);
