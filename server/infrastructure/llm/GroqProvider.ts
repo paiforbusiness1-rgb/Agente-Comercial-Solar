@@ -65,14 +65,22 @@ export class GroqProvider implements ILLMProvider {
         });
 
         if (!res.ok) {
-          const err = await res.json() as any;
-          const isRetryable = res.status === 429 || res.status >= 500;
+          const err = (await res.json().catch(() => ({}))) as any;
+          if (res.status === 429) {
+            logger.warn(`[GroqProvider] HTTP 429 Rate/TPM limit exceeded (${err?.error?.message || res.statusText}). Instant failover.`);
+            const rateLimitErr = new Error(`Groq API error 429: ${err?.error?.message || res.statusText}`);
+            (rateLimitErr as any).status = 429;
+            throw rateLimitErr;
+          }
+          const isRetryable = res.status >= 500;
           if (isRetryable && attempt < MAX_RETRIES) {
             logger.warn(`[GroqProvider] Retryable error ${res.status}, retrying in ${RETRY_DELAY_MS}ms...`);
             await sleep(RETRY_DELAY_MS * attempt);
             continue;
           }
-          throw new Error(`Groq API error ${res.status}: ${err?.error?.message || res.statusText}`);
+          const apiErr = new Error(`Groq API error ${res.status}: ${err?.error?.message || res.statusText}`);
+          (apiErr as any).status = res.status;
+          throw apiErr;
         }
 
         const data = await res.json() as any;
@@ -98,8 +106,8 @@ export class GroqProvider implements ILLMProvider {
           toolCalls: [],
         };
       } catch (err: any) {
-        if (attempt === MAX_RETRIES) {
-          logger.error('[GroqProvider] All retries exhausted', { error: err.message });
+        if (err?.status === 429 || attempt === MAX_RETRIES) {
+          logger.error('[GroqProvider] Error encountered, aborting attempts', { error: err.message, status: err?.status });
           throw err;
         }
         await sleep(RETRY_DELAY_MS * attempt);

@@ -32,28 +32,33 @@ async function sanitizeHectorChat() {
   const data = doc.data() as any;
   let messages = data.messages || [];
 
-  console.log(`Total de mensajes antes del saneamiento: ${messages.length}`);
+  console.log(`Mensajes actuales (${messages.length}):`);
+  messages.forEach((m: any, idx: number) => {
+    console.log(`[${idx}] ${m.sender}: ${m.text?.substring(0, 80)}`);
+  });
 
-  // Encontrar el índice del mensaje donde Sofía ofrece el brochure de financiamiento
-  const financingOfferIndex = messages.findIndex((m: any) => 
-    m.sender === 'bot' && m.text.includes('¿Te gustaría que te envíe el brochure oficial con los requisitos y pasos para tramitar el financiamiento?')
+  // Encontrar si hay mensaje de intermitencia técnica
+  const intermitenciaIndex = messages.findIndex((m: any) => 
+    m.sender === 'bot' && m.text.includes('intermitencia técnica')
   );
 
-  if (financingOfferIndex !== -1) {
-    // Truncar exactamente al mensaje de oferta de financiamiento (incluyéndolo como el último mensaje)
-    messages = messages.slice(0, financingOfferIndex + 1);
-    console.log(`✅ Historial truncado exactamente en el ofrecimiento de financiamiento (índice ${financingOfferIndex + 1}).`);
+  if (intermitenciaIndex !== -1) {
+    // Truncar antes del mensaje del usuario que provocó el fallo (ej. "te comparto los recibos aguarda!")
+    const truncateAt = Math.max(0, intermitenciaIndex - 1);
+    messages = messages.slice(0, truncateAt);
+    console.log(`✅ Historial truncado eliminando el turno fallido (truncado a índice ${truncateAt}).`);
   } else {
-    console.warn('⚠️ No se encontró la frase exacta de financiamiento; verificando mensajes finales.');
+    // Si no hay intermitencia, verificar si el último es bot en QUALIFICATION
+    console.log(`ℹ️ No se detectó mensaje de intermitencia.`);
   }
 
   data.messages = messages;
+  data.nombre = 'Héctor';
   data.state = data.state || {};
-  data.state.phase = 'FINANCING';
-  data.state.financingConsentRequested = true;
-  data.state.financingConsentGiven = false;
+  data.state.phase = 'QUALIFICATION';
+  data.state.clientName = 'Héctor';
   data.state.mediaSentFlags = data.state.mediaSentFlags || {};
-  data.state.mediaSentFlags.financiamiento = false;
+  data.state.mediaSentFlags.instalacionProfessional = true;
   data.botDisabled = false;
 
   const lastMsg = messages[messages.length - 1];
@@ -72,13 +77,12 @@ async function sanitizeHectorChat() {
 
   console.log(`\n--- VERIFICACIÓN POST-SANEAMIENTO ---`);
   console.log(`Total mensajes: ${postMessages.length}`);
-  console.log(`Último mensaje (${finalMsg?.sender}): "${finalMsg?.text.substring(0, 100)}..."`);
-  console.log(`Phase: ${postData.state.phase}`);
-  console.log(`FinancingConsentRequested: ${postData.state.financingConsentRequested}`);
-  console.log(`FinancingConsentGiven: ${postData.state.financingConsentGiven}`);
-  console.log(`MediaSentFlags.financiamiento: ${postData.state.mediaSentFlags?.financiamiento}`);
+  console.log(`Último mensaje (${finalMsg?.sender}): "${finalMsg?.text?.substring(0, 100)}..."`);
+  console.log(`Phase: ${postData.state?.phase}`);
+  console.log(`ClientName: ${postData.nombre}`);
   console.log(`BotDisabled: ${postData.botDisabled}`);
   console.log(`=== SANEAMIENTO COMPLETADO CON ÉXITO ===`);
+  process.exit(0);
 }
 
 sanitizeHectorChat().catch((err) => {

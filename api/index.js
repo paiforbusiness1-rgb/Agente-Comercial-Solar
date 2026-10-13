@@ -147,14 +147,22 @@ var GroqProvider = class {
           signal: AbortSignal.timeout(this.timeoutMs)
         });
         if (!res.ok) {
-          const err = await res.json();
-          const isRetryable = res.status === 429 || res.status >= 500;
+          const err = await res.json().catch(() => ({}));
+          if (res.status === 429) {
+            logger.warn(`[GroqProvider] HTTP 429 Rate/TPM limit exceeded (${err?.error?.message || res.statusText}). Instant failover.`);
+            const rateLimitErr = new Error(`Groq API error 429: ${err?.error?.message || res.statusText}`);
+            rateLimitErr.status = 429;
+            throw rateLimitErr;
+          }
+          const isRetryable = res.status >= 500;
           if (isRetryable && attempt < MAX_RETRIES) {
             logger.warn(`[GroqProvider] Retryable error ${res.status}, retrying in ${RETRY_DELAY_MS}ms...`);
             await sleep(RETRY_DELAY_MS * attempt);
             continue;
           }
-          throw new Error(`Groq API error ${res.status}: ${err?.error?.message || res.statusText}`);
+          const apiErr = new Error(`Groq API error ${res.status}: ${err?.error?.message || res.statusText}`);
+          apiErr.status = res.status;
+          throw apiErr;
         }
         const data = await res.json();
         const choice = data.choices?.[0];
@@ -177,8 +185,8 @@ var GroqProvider = class {
           toolCalls: []
         };
       } catch (err) {
-        if (attempt === MAX_RETRIES) {
-          logger.error("[GroqProvider] All retries exhausted", { error: err.message });
+        if (err?.status === 429 || attempt === MAX_RETRIES) {
+          logger.error("[GroqProvider] Error encountered, aborting attempts", { error: err.message, status: err?.status });
           throw err;
         }
         await sleep(RETRY_DELAY_MS * attempt);
@@ -235,6 +243,12 @@ var LLMCircuitBreaker = class {
       logger.error(`[CircuitBreaker:${this.name}] UMBRAL ALCANZADO. Circuito pasa a OPEN. Desv\xEDo proactivo activado por ${this.cooldownMs}ms.`);
     }
   }
+  trip(reason) {
+    this.state = "OPEN";
+    this.consecutiveFailures = this.failureThreshold;
+    this.lastFailureTime = Date.now();
+    logger.error(`[CircuitBreaker:${this.name}] FORCED TRIP TO OPEN (${reason || "Immediate trip"}). Desv\xEDo proactivo activado por ${this.cooldownMs}ms.`);
+  }
   reset() {
     this.state = "CLOSED";
     this.consecutiveFailures = 0;
@@ -261,11 +275,20 @@ var ResilientLLMProvider = class {
         this.groqCircuit.recordSuccess();
         return result;
       } catch (groqErr) {
-        this.groqCircuit.recordFailure(groqErr);
-        logger.warn(
-          `[ResilientLLM] Groq timeout/failure detected. Failing over to Gemini 2.5 Flash for phone: ${phone}`,
-          { error: groqErr.message, phone, groqCircuitState: this.groqCircuit.getState() }
-        );
+        const isRateLimit = groqErr?.status === 429 || typeof groqErr?.message === "string" && groqErr.message.includes("429");
+        if (isRateLimit) {
+          this.groqCircuit.trip("HTTP 429 Rate/TPM Limit");
+          logger.warn(
+            `[ResilientLLM] Groq HTTP 429 rate/TPM limit detected. Instant 0ms trip and failover to Gemini 2.5 Flash for phone: ${phone}`,
+            { error: groqErr.message, phone, groqCircuitState: this.groqCircuit.getState() }
+          );
+        } else {
+          this.groqCircuit.recordFailure(groqErr);
+          logger.warn(
+            `[ResilientLLM] Groq timeout/failure detected. Failing over to Gemini 2.5 Flash for phone: ${phone}`,
+            { error: groqErr.message, phone, groqCircuitState: this.groqCircuit.getState() }
+          );
+        }
       }
     } else {
       logger.info(
@@ -1893,6 +1916,63 @@ Todas las opciones incluyen la garant\xEDa de los paneles, la instalaci\xF3n pro
 \xA1Que tengas un excelente d\xEDa!`;
         await this.orchestrator.triggerLeadHandoff(currentConv, phone, currentConv.nombre || "Cliente", "Solicitud de visita t\xE9cnica gratuita");
         leadGenerated = true;
+      } else if (currentPhase === "GREETING" || currentPhase === "QUALIFICATION") {
+        const lowerText = effectiveMessageText.toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").trim();
+        const waitingKeywords = [
+          "comparto",
+          "aguarda",
+          "espera",
+          "voy por",
+          "un momento",
+          "ahora",
+          "ahi van",
+          "ahi va",
+          "listo",
+          "voy",
+          "dame un minuto",
+          "dame un momento",
+          "ya te los paso",
+          "te los paso",
+          "te los mando",
+          "busco",
+          "buscando",
+          "estoy buscando",
+          "dejame ver",
+          "dejame buscar"
+        ];
+        const isWaiting = waitingKeywords.some((k) => lowerText.includes(k.normalize("NFD").replace(/[\u0300-\u036f]/g, "")));
+        const billRegex = /(?:pago|consumo|recibo|llega|es de|aprox|alrededor de)?\s*\$?\s*([0-9]{1,3}(?:,[0-9]{3})+|[0-9]{3,6})(?:\s*(?:pesos|mxn))?\s*(bimestral(?:es)?|mensual(?:es)?)?/i;
+        const billMatch = billRegex.exec(effectiveMessageText);
+        const nameMatch = /(?:soy|me llamo|mi nombre es)\s+([a-záéíóúñ]+)/i.exec(effectiveMessageText);
+        if (isWaiting) {
+          const displayName = clientName || (currentConv.nombre && currentConv.nombre !== "Cliente" ? currentConv.nombre : "Cliente");
+          fallbackReply = `\xA1Perfecto, ${displayName}! \u{1F60A} Quedo a la espera de tus recibos CFE. T\xF3mate tu tiempo, en cuanto los compartas los analizar\xE9 de inmediato para darte la mejor propuesta. \u2600\uFE0F`;
+        } else if (billMatch && Number(billMatch[1].replace(/,/g, "")) >= 200) {
+          const rawAmount = Number(billMatch[1].replace(/,/g, ""));
+          const isBimestral = !billMatch[2] || billMatch[2].toLowerCase().includes("bimestral");
+          const monthlyBill = isBimestral ? Math.round(rawAmount / 2) : rawAmount;
+          const bimestralBill = isBimestral ? rawAmount : rawAmount * 2;
+          const freq = isBimestral ? "bimestral" : "mensual";
+          currentConv.state.monthlyBill = monthlyBill;
+          currentConv.state.bimestralBill = bimestralBill;
+          currentConv.state.billFrequency = freq;
+          currentConv.state.phase = "TECHNICAL_SURVEY";
+          currentConv.montoRecibo = `$${rawAmount.toLocaleString("es-MX")} MXN (${freq})`;
+          currentConv.state.equivalenceStated = true;
+          if (!currentConv.state.completedSteps.includes("BILL_NORMALIZED")) {
+            currentConv.state.completedSteps.push("BILL_NORMALIZED");
+          }
+          const displayName = clientName ? `, ${clientName}` : "";
+          fallbackReply = `\xA1Excelente${displayName}! Recib\xED tu consumo de $${rawAmount.toLocaleString("es-MX")} MXN (${freq}). Para dise\xF1ar tu soluci\xF3n solar a la medida, \xBFpodr\xEDas indicarme qu\xE9 tipo de techo tienes en tu propiedad (concreto, l\xE1mina o teja)? \u{1F3E0}`;
+        } else if (currentPhase === "GREETING" && nameMatch) {
+          const extractedName = nameMatch[1].trim();
+          const cleanExtractedName = extractedName.charAt(0).toUpperCase() + extractedName.slice(1).toLowerCase();
+          currentConv.nombre = cleanExtractedName;
+          currentConv.state.phase = "QUALIFICATION";
+          fallbackReply = `\xA1Hola ${cleanExtractedName}! \u{1F60A} Para dise\xF1ar tu soluci\xF3n solar a la medida, por favor ind\xEDcame el monto aproximado de tu recibo de luz (bimestral o mensual) o comparte fotos de tu recibo CFE. \u{1F4C4}\u2600\uFE0F`;
+        } else {
+          fallbackReply = `${greeting} Recib\xED tu mensaje. Estamos experimentando una peque\xF1a intermitencia t\xE9cnica en este momento. Tu informaci\xF3n ya qued\xF3 registrada y en unos minutos uno de nuestros asesores continuar\xE1 atendi\xE9ndote por aqu\xED.`;
+        }
       } else {
         fallbackReply = `${greeting} Recib\xED tu mensaje. Estamos experimentando una peque\xF1a intermitencia t\xE9cnica en este momento. Tu informaci\xF3n ya qued\xF3 registrada y en unos minutos uno de nuestros asesores continuar\xE1 atendi\xE9ndote por aqu\xED.`;
       }

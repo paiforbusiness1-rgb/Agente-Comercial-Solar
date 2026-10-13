@@ -57,11 +57,20 @@ export class ResilientLLMProvider implements ILLMProvider {
         this.groqCircuit.recordSuccess();
         return result;
       } catch (groqErr: any) {
-        this.groqCircuit.recordFailure(groqErr);
-        logger.warn(
-          `[ResilientLLM] Groq timeout/failure detected. Failing over to Gemini 2.5 Flash for phone: ${phone}`,
-          { error: groqErr.message, phone, groqCircuitState: this.groqCircuit.getState() }
-        );
+        const isRateLimit = groqErr?.status === 429 || (typeof groqErr?.message === 'string' && groqErr.message.includes('429'));
+        if (isRateLimit) {
+          this.groqCircuit.trip('HTTP 429 Rate/TPM Limit');
+          logger.warn(
+            `[ResilientLLM] Groq HTTP 429 rate/TPM limit detected. Instant 0ms trip and failover to Gemini 2.5 Flash for phone: ${phone}`,
+            { error: groqErr.message, phone, groqCircuitState: this.groqCircuit.getState() }
+          );
+        } else {
+          this.groqCircuit.recordFailure(groqErr);
+          logger.warn(
+            `[ResilientLLM] Groq timeout/failure detected. Failing over to Gemini 2.5 Flash for phone: ${phone}`,
+            { error: groqErr.message, phone, groqCircuitState: this.groqCircuit.getState() }
+          );
+        }
       }
     } else {
       logger.info(

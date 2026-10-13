@@ -82,6 +82,13 @@ export class LLMCircuitBreaker {
     }
   }
 
+  public trip(reason?: string): void {
+    this.state = 'OPEN';
+    this.consecutiveFailures = this.failureThreshold;
+    this.lastFailureTime = Date.now();
+    logger.error(`[CircuitBreaker:${this.name}] FORCED TRIP TO OPEN (${reason || 'Immediate trip'}). Desvío proactivo activado por ${this.cooldownMs}ms.`);
+  }
+
   public reset(): void {
     this.state = 'CLOSED';
     this.consecutiveFailures = 0;

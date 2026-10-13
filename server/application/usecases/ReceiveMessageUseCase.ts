@@ -522,6 +522,59 @@ export class ReceiveMessageUseCase {
         
         await this.orchestrator.triggerLeadHandoff(currentConv, phone, currentConv.nombre || 'Cliente', 'Solicitud de visita técnica gratuita');
         leadGenerated = true;
+      }
+      // CASO 8: GREETING o QUALIFICATION (Blindaje Universal Pasos 1 y 2 - APO-025)
+      else if (currentPhase === 'GREETING' || currentPhase === 'QUALIFICATION') {
+        const lowerText = effectiveMessageText.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').trim();
+
+        // 1. Detección de intención de espera / búsqueda de recibos
+        const waitingKeywords = [
+          'comparto', 'aguarda', 'espera', 'voy por', 'un momento', 'ahora',
+          'ahi van', 'ahi va', 'listo', 'voy', 'dame un minuto', 'dame un momento',
+          'ya te los paso', 'te los paso', 'te los mando', 'busco', 'buscando',
+          'estoy buscando', 'dejame ver', 'dejame buscar'
+        ];
+        const isWaiting = waitingKeywords.some(k => lowerText.includes(k.normalize('NFD').replace(/[\u0300-\u036f]/g, '')));
+
+        // 2. Detección de monto de recibo en texto (ej. "pago 1500 bimestrales", "$3000 al mes", "como 2500")
+        const billRegex = /(?:pago|consumo|recibo|llega|es de|aprox|alrededor de)?\s*\$?\s*([0-9]{1,3}(?:,[0-9]{3})+|[0-9]{3,6})(?:\s*(?:pesos|mxn))?\s*(bimestral(?:es)?|mensual(?:es)?)?/i;
+        const billMatch = billRegex.exec(effectiveMessageText);
+
+        // 3. Detección de nombre en GREETING (ej. "soy Héctor", "me llamo Carlos", o texto de 1-2 palabras)
+        const nameMatch = /(?:soy|me llamo|mi nombre es)\s+([a-záéíóúñ]+)/i.exec(effectiveMessageText);
+
+        if (isWaiting) {
+          const displayName = clientName || (currentConv.nombre && currentConv.nombre !== 'Cliente' ? currentConv.nombre : 'Cliente');
+          fallbackReply = `¡Perfecto, ${displayName}! 😊 Quedo a la espera de tus recibos CFE. Tómate tu tiempo, en cuanto los compartas los analizaré de inmediato para darte la mejor propuesta. ☀️`;
+        } else if (billMatch && Number(billMatch[1].replace(/,/g, '')) >= 200) {
+          const rawAmount = Number(billMatch[1].replace(/,/g, ''));
+          const isBimestral = !billMatch[2] || billMatch[2].toLowerCase().includes('bimestral');
+          const monthlyBill = isBimestral ? Math.round(rawAmount / 2) : rawAmount;
+          const bimestralBill = isBimestral ? rawAmount : rawAmount * 2;
+          const freq = isBimestral ? 'bimestral' : 'mensual';
+
+          currentConv.state.monthlyBill = monthlyBill;
+          currentConv.state.bimestralBill = bimestralBill;
+          currentConv.state.billFrequency = freq;
+          currentConv.state.phase = 'TECHNICAL_SURVEY';
+          (currentConv as any).montoRecibo = `$${rawAmount.toLocaleString('es-MX')} MXN (${freq})`;
+          currentConv.state.equivalenceStated = true;
+          if (!currentConv.state.completedSteps.includes('BILL_NORMALIZED')) {
+            currentConv.state.completedSteps.push('BILL_NORMALIZED');
+          }
+
+          const displayName = clientName ? `, ${clientName}` : '';
+          fallbackReply = `¡Excelente${displayName}! Recibí tu consumo de $${rawAmount.toLocaleString('es-MX')} MXN (${freq}). Para diseñar tu solución solar a la medida, ¿podrías indicarme qué tipo de techo tienes en tu propiedad (concreto, lámina o teja)? 🏠`;
+        } else if (currentPhase === 'GREETING' && nameMatch) {
+          const extractedName = nameMatch[1].trim();
+          const cleanExtractedName = extractedName.charAt(0).toUpperCase() + extractedName.slice(1).toLowerCase();
+          currentConv.nombre = cleanExtractedName;
+          currentConv.state.phase = 'QUALIFICATION';
+          
+          fallbackReply = `¡Hola ${cleanExtractedName}! 😊 Para diseñar tu solución solar a la medida, por favor indícame el monto aproximado de tu recibo de luz (bimestral o mensual) o comparte fotos de tu recibo CFE. 📄☀️`;
+        } else {
+          fallbackReply = `${greeting} Recibí tu mensaje. Estamos experimentando una pequeña intermitencia técnica en este momento. Tu información ya quedó registrada y en unos minutos uno de nuestros asesores continuará atendiéndote por aquí.`;
+        }
       } else {
         // Fallback Secundario: Solo si NO hay datos suficientes para continuar deterministamente
         fallbackReply = `${greeting} Recibí tu mensaje. Estamos experimentando una pequeña intermitencia técnica en este momento. Tu información ya quedó registrada y en unos minutos uno de nuestros asesores continuará atendiéndote por aquí.`;
